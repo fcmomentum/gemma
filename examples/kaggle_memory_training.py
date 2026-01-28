@@ -77,12 +77,14 @@ def load_pg19_books(split: str = "train", max_books: int = None) -> list[str]:
     print(f"Loaded {len(texts)} books from {split}")
     return texts
 
-# Load a subset for testing
-train_texts = load_pg19_books("train", max_books=None)  # Start small
+# Load a subset for training (full dataset is 28K books, 11GB - too slow to tokenize)
+MAX_BOOKS = 1000  # Limit books for practical training time
+train_texts = load_pg19_books("train", max_books=MAX_BOOKS)
 print(f"Total characters: {sum(len(t) for t in train_texts):,}")
 
 # === Tokenizer and Data Processing ===
 from gemma import gm
+from tqdm import tqdm
 
 tokenizer = gm.text.Gemma3Tokenizer()  # Use Gemma3 tokenizer
 
@@ -90,26 +92,32 @@ tokenizer = gm.text.Gemma3Tokenizer()  # Use Gemma3 tokenizer
 MAX_LENGTH = 1024  # Sequence length (must be > window_size for memory loss)
 WINDOW_SIZE = 512   # Gemma3 1B sliding window
 BATCH_SIZE = 8      # Larger batch for smaller model
+MAX_EXAMPLES = 100000  # Limit total examples to cap training time
 
-def create_training_examples(texts: list[str], max_length: int) -> Iterator[dict]:
-    """Convert book texts to training examples."""
-    for text in texts:
+def create_training_examples(texts: list[str], max_length: int, max_examples: int = None) -> Iterator[dict]:
+    """Convert book texts to training examples with progress tracking."""
+    count = 0
+    for text in tqdm(texts, desc="Tokenizing books"):
         # Tokenize
         tokens = tokenizer.encode(text)
 
         # Create overlapping chunks
         stride = max_length // 2  # 50% overlap
         for i in range(0, len(tokens) - max_length, stride):
+            if max_examples and count >= max_examples:
+                return
             chunk = tokens[i : i + max_length]
             yield {
                 "input": np.array(chunk[:-1], dtype=np.int32),
                 "target": np.array(chunk[1:], dtype=np.int32),
                 "loss_mask": np.ones(len(chunk) - 1, dtype=np.float32),
             }
+            count += 1
 
-# Create examples
-examples = list(create_training_examples(train_texts, MAX_LENGTH))
-print(f"Created {len(examples)} training examples")
+# Create examples with progress bar
+print(f"Creating training examples (max {MAX_EXAMPLES:,})...")
+examples = list(create_training_examples(train_texts, MAX_LENGTH, MAX_EXAMPLES))
+print(f"Created {len(examples):,} training examples")
 
 # === Load Split-Brain Memory Model ===
 model = gm.nn.Gemma3_1B(tokens="input")
