@@ -312,7 +312,17 @@ def quick_evaluate(params):
     print(f"  Perplexity: {perplexity:.2f}, XEnt: {avg_xent:.4f}, MemLoss: {avg_mem_loss:.4f}")
     return {"xent": avg_xent, "mem_loss": avg_mem_loss, "perplexity": perplexity}
 
-print(f"Starting training from step {start_step}...")
+# === Evaluate Baseline Before Training ===
+print("\n--- Baseline Evaluation (Before Training) ---")
+baseline_metrics = quick_evaluate(baseline_params)
+wandb.log({
+    "baseline/xent": baseline_metrics["xent"],
+    "baseline/mem_loss": baseline_metrics["mem_loss"],
+    "baseline/perplexity": baseline_metrics["perplexity"],
+})
+print(f"Baseline perplexity: {baseline_metrics['perplexity']:.2f}")
+
+print(f"\nStarting training from step {start_step}...")
 step = start_step
 
 for epoch in range(NUM_EPOCHS):
