@@ -59,11 +59,17 @@ class GemmaEvaluator:
         self.model = model
         self.tokenizer = tokenizer
 
-    @jax.jit
-    def get_logits(self, params, input_ids):
+        # Create jitted function with model captured in closure
+        @jax.jit
+        def _get_logits(params, input_ids):
+            output = model.apply({'params': params}, input_ids)
+            return output.logits
+
+        self._get_logits_fn = _get_logits
+
+    def get_logits(self, input_ids):
         """Get logits for input tokens."""
-        output = self.model.apply({'params': params}, input_ids)
-        return output.logits
+        return self._get_logits_fn(self.params, input_ids)
 
     def score_choices(self, prompt: str, choices: list[str]) -> int:
         """Score multiple choices and return index of best one."""
@@ -77,7 +83,7 @@ class GemmaEvaluator:
 
             # Get logits
             input_ids = jnp.array([tokens[:-1]])  # All but last token
-            logits = self.get_logits(self.params, input_ids)
+            logits = self.get_logits(input_ids)
 
             # Calculate log probability of choice tokens
             choice_start = len(prompt_tokens) - 1  # -1 because we shifted
