@@ -230,14 +230,18 @@ for epoch in range(NUM_EPOCHS):
         params, opt_state, metrics = train_step(params, opt_state, batch)
 
         if step % LOG_EVERY == 0:
+            # Convert JAX arrays to Python floats
+            loss_val = float(metrics['loss'])
+            xent_val = float(metrics['xent'])
+            mem_val = float(metrics['mem_loss'])
+
             # Log to console
-            print(f"Step {step}: loss={metrics['loss']:.4f}, "
-                  f"xent={metrics['xent']:.4f}, mem_loss={metrics['mem_loss']:.4f}")
+            print(f"Step {step}: loss={loss_val:.4f}, xent={xent_val:.4f}, mem_loss={mem_val:.4f}")
             # Log to WandB
             wandb.log({
-                "loss": float(metrics['loss']),
-                "xent": float(metrics['xent']),
-                "mem_loss": float(metrics['mem_loss']),
+                "loss": loss_val,
+                "xent": xent_val,
+                "mem_loss": mem_val,
                 "step": step,
             })
 
