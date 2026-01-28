@@ -205,6 +205,19 @@ def batch_examples(examples: list, batch_size: int) -> Iterator[dict]:
 # === Training Loop ===
 NUM_EPOCHS = 1
 LOG_EVERY = 10
+CHECKPOINT_EVERY = 500  # Save checkpoint every N steps
+
+# Prepare checkpoint directory
+import pickle
+checkpoint_dir = "/kaggle/working/checkpoint"
+os.makedirs(checkpoint_dir, exist_ok=True)
+
+def save_checkpoint(params, step):
+    """Save checkpoint with step number."""
+    checkpoint_path = os.path.join(checkpoint_dir, f"params_step_{step}.pkl")
+    with open(checkpoint_path, "wb") as f:
+        pickle.dump(jax.device_get(params), f)
+    print(f"Checkpoint saved: {checkpoint_path}")
 
 print("Starting training...")
 step = 0
@@ -227,6 +240,10 @@ for epoch in range(NUM_EPOCHS):
                 "mem_loss": float(metrics['mem_loss']),
                 "step": step,
             })
+
+        # Periodic checkpoint
+        if step > 0 and step % CHECKPOINT_EVERY == 0:
+            save_checkpoint(params, step)
 
         step += 1
 
