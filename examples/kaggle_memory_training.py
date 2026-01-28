@@ -13,21 +13,21 @@ import glob
 import functools
 from typing import Iterator
 
-# Initialize TPU before importing JAX
-os.environ['JAX_PLATFORMS'] = 'tpu,cpu'
+# Don't force JAX_PLATFORMS - let it auto-detect TPU/GPU/CPU
+# The system needs libtpu.so for TPU (only available in system Python, not uv venv)
 
 import jax
 import jax.numpy as jnp
 import optax
 import numpy as np
 
-# Check devices - should show TPU
+# Check devices
 print(f"JAX devices: {jax.devices()}")
 print(f"Device count: {jax.device_count()}")
 print(f"Default backend: {jax.default_backend()}")
 
-if jax.default_backend() != 'tpu':
-    print("WARNING: Not running on TPU! Training will be slow.")
+if jax.default_backend() == 'cpu':
+    print("WARNING: Running on CPU! Use system Python (not uv) for TPU access.")
 
 # Initialize WandB (uses WANDB_API_KEY from environment)
 import wandb
