@@ -135,11 +135,11 @@ def memory_reconstruction_loss(hidden_states, window_size: int = 512):
     Trains model to predict state of token T-W from current state T.
     """
     if hidden_states is None:
-        return 0.0
+        return jnp.array(0.0)
 
     seq_len = hidden_states.shape[1]
     if seq_len <= window_size:
-        return 0.0
+        return jnp.array(0.0)
 
     # Current state (time T)
     current = hidden_states[:, window_size:, :]
