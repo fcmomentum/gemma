@@ -255,8 +255,19 @@ def save_checkpoint(params, step):
         pickle.dump(jax.device_get(params), f)
     print(f"Checkpoint saved: {checkpoint_path}")
 
-    # Rolling checkpoint: delete old checkpoints
-    checkpoints = sorted(glob.glob(os.path.join(checkpoint_dir, "params_step_*.pkl")))
+    # Rolling checkpoint: delete old checkpoints (sort numerically by step)
+    checkpoints = glob.glob(os.path.join(checkpoint_dir, "params_step_*.pkl"))
+
+    def get_step_num(path):
+        """Extract step number from checkpoint path."""
+        try:
+            return int(os.path.basename(path).split("_step_")[1].replace(".pkl", ""))
+        except:
+            return 0
+
+    # Sort by step number (numerical), not alphabetically
+    checkpoints = sorted(checkpoints, key=get_step_num)
+
     while len(checkpoints) > MAX_CHECKPOINTS:
         old_ckpt = checkpoints.pop(0)
         os.remove(old_ckpt)
