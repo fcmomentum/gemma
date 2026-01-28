@@ -36,6 +36,13 @@ with _epy.lazy_api_imports(globals()):
   # Gemma 3n
   from gemma.gm.nn.gemma3n._gemma3n import Gemma3n_E2B
   from gemma.gm.nn.gemma3n._gemma3n import Gemma3n_E4B
+  # Split-Brain Memory variants
+  from gemma.gm.nn._gemma_memory import Gemma2_2B_Memory
+  from gemma.gm.nn._gemma_memory import Gemma2_9B_Memory
+  from gemma.gm.nn._gemma_memory import Gemma3_1B_Memory
+  from gemma.gm.nn._gemma_memory import Gemma3_4B_Memory
+  from gemma.gm.nn._memory_transformer import MemoryTransformer
+  from gemma.gm.nn._memory_transformer import MemoryOutput
 
   # ****************************************************************************
   # Wrapper (LoRA, quantization, DPO,...)
@@ -59,6 +66,11 @@ with _epy.lazy_api_imports(globals()):
   from gemma.gm.nn._modules import Block
   from gemma.gm.nn._modules import FeedForward
   from gemma.gm.nn._modules import AttentionType
+
+  # Split-Brain Memory Attention
+  from gemma.gm.nn._memory_attention import MemoryConfig
+  from gemma.gm.nn._memory_attention import SplitBrainAttention
+  from gemma.gm.nn._memory_attention import SplitBrainBlock
 
   # Model inputs
   from gemma.gm.nn._config import Cache

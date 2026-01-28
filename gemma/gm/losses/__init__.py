@@ -15,4 +15,6 @@
 """Losses."""
 
 from gemma.gm.losses._dpo import DpoLoss
+from gemma.gm.losses._memory import MemoryL1Loss
+from gemma.gm.losses._memory import MemoryReconstructionLoss
 from gemma.gm.losses._npo import NpoLoss
