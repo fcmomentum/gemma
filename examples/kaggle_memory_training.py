@@ -1,23 +1,13 @@
 # Split-Brain Memory Training on Kaggle
 # =====================================
-# This notebook trains Gemma with Split-Brain memory heads using PG-19 dataset.
+# This script trains Gemma with Split-Brain memory heads using PG-19 dataset.
 #
 # Setup:
 # 1. Add Kaggle dataset: "the-pg19-language-modeling-benchmark-dataset"
 # 2. Enable TPU accelerator
-# 3. Run all cells
+# 3. Set WANDB_API_KEY in Kaggle secrets
+# 4. Run: uv run kaggle_memory_training.py
 
-# %% [markdown]
-# ## Cell 1: Install Dependencies
-
-# %%
-# !pip install -q gemma flax optax wandb
-# !pip install -q jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-
-# %% [markdown]
-# ## Cell 2: Imports and Device Check
-
-# %%
 import os
 import glob
 import functools
@@ -31,9 +21,8 @@ import numpy as np
 print(f"JAX devices: {jax.devices()}")
 print(f"Device count: {jax.device_count()}")
 
-# Initialize WandB
+# Initialize WandB (uses WANDB_API_KEY from environment)
 import wandb
-wandb.login()  # Will prompt for API key on first run
 wandb.init(
     project="gemma-memory",
     name="pg19-splitbrain",
@@ -46,10 +35,7 @@ wandb.init(
     }
 )
 
-# %% [markdown]
-# ## Cell 3: Load PG-19 Dataset from Kaggle
-
-# %%
+# === Load PG-19 Dataset ===
 PG19_PATH = "/kaggle/input/the-pg19-language-modeling-benchmark-dataset"
 
 def load_pg19_books(split: str = "train", max_books: int = None) -> list[str]:
@@ -87,10 +73,7 @@ def load_pg19_books(split: str = "train", max_books: int = None) -> list[str]:
 train_texts = load_pg19_books("train", max_books=100)  # Start small
 print(f"Total characters: {sum(len(t) for t in train_texts):,}")
 
-# %% [markdown]
-# ## Cell 4: Tokenizer and Data Processing
-
-# %%
+# === Tokenizer and Data Processing ===
 from gemma import gm
 
 tokenizer = gm.text.Gemma3Tokenizer()  # Use Gemma3 tokenizer
@@ -120,40 +103,18 @@ def create_training_examples(texts: list[str], max_length: int) -> Iterator[dict
 examples = list(create_training_examples(train_texts, MAX_LENGTH))
 print(f"Created {len(examples)} training examples")
 
-def batch_examples(examples: list, batch_size: int) -> Iterator[dict]:
-    """Batch examples together."""
-    np.random.shuffle(examples)
-    for i in range(0, len(examples) - batch_size, batch_size):
-        batch = examples[i : i + batch_size]
-        yield {
-            "input": np.stack([e["input"] for e in batch]),
-            "target": np.stack([e["target"] for e in batch]),
-            "loss_mask": np.stack([e["loss_mask"] for e in batch]),
-        }
-
-# %% [markdown]
-# ## Cell 5: Load Split-Brain Memory Model
-
-# %%
-# Import the memory modules (copy these files to Kaggle or install gemma with memory support)
-# For now, we'll use standard Gemma2 and add memory loss manually
-
+# === Load Split-Brain Memory Model ===
 model = gm.nn.Gemma3_1B(tokens="input")
 
 # Load pretrained weights
-# Note: load_params takes path only, not model
 params = gm.ckpts.load_params(
     path=gm.ckpts.CheckpointPath.GEMMA3_1B_IT,
 )
 print("Gemma3 1B loaded successfully!")
 
-# %% [markdown]
-# ## Cell 6: Define Loss Functions
-
-# %%
+# === Define Loss Functions ===
 def cross_entropy_loss(logits, targets, mask):
     """Standard next-token prediction loss."""
-    # Shift for causal LM
     vocab_size = logits.shape[-1]
     one_hot = jax.nn.one_hot(targets, vocab_size)
     log_probs = jax.nn.log_softmax(logits)
@@ -180,10 +141,7 @@ def memory_reconstruction_loss(hidden_states, window_size: int = 512):
     # L1 loss
     return jnp.mean(jnp.abs(current - target))
 
-# %% [markdown]
-# ## Cell 7: Training Step
-
-# %%
+# === Training Setup ===
 optimizer = optax.adafactor(learning_rate=1e-4)
 opt_state = optimizer.init(params)
 
@@ -210,8 +168,6 @@ def train_step(params, opt_state, batch):
         )
 
         # Memory reconstruction loss (on hidden states)
-        # Note: For full Split-Brain, you'd use memory_states from SplitBrainAttention
-        # Here we approximate using final hidden states
         mem_loss = memory_reconstruction_loss(
             output.hidden_states,
             window_size=EFFECTIVE_WINDOW,
@@ -227,10 +183,18 @@ def train_step(params, opt_state, batch):
 
     return params, opt_state, {"loss": loss, "xent": xent, "mem_loss": mem_loss}
 
-# %% [markdown]
-# ## Cell 8: Training Loop
+def batch_examples(examples: list, batch_size: int) -> Iterator[dict]:
+    """Batch examples together."""
+    np.random.shuffle(examples)
+    for i in range(0, len(examples) - batch_size, batch_size):
+        batch = examples[i : i + batch_size]
+        yield {
+            "input": np.stack([e["input"] for e in batch]),
+            "target": np.stack([e["target"] for e in batch]),
+            "loss_mask": np.stack([e["loss_mask"] for e in batch]),
+        }
 
-# %%
+# === Training Loop ===
 NUM_EPOCHS = 1
 LOG_EVERY = 10
 
@@ -260,20 +224,13 @@ for epoch in range(NUM_EPOCHS):
 
 print(f"Training complete! Total steps: {step}")
 
-# %% [markdown]
-# ## Cell 9: Save Checkpoint
-
-# %%
-# Save trained params
+# === Save Checkpoint ===
 import pickle
 with open("/kaggle/working/memory_trained_params.pkl", "wb") as f:
     pickle.dump(params, f)
 print("Checkpoint saved!")
 
-# %% [markdown]
-# ## Cell 10: Test Generation
-
-# %%
+# === Test Generation ===
 def generate(prompt: str, max_new_tokens: int = 50):
     """Generate text from prompt."""
     input_ids = tokenizer.encode(prompt)
@@ -289,3 +246,6 @@ def generate(prompt: str, max_new_tokens: int = 50):
 # Test
 prompt = "Once upon a time in a distant kingdom,"
 print(generate(prompt))
+
+# Finish WandB run
+wandb.finish()
