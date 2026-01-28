@@ -106,7 +106,7 @@ class GemmaEvaluator:
         """Evaluate on HellaSwag (commonsense completion)."""
         try:
             from datasets import load_dataset
-            dataset = load_dataset("hellaswag", split="validation", trust_remote_code=True)
+            dataset = load_dataset("Rowan/hellaswag", split="validation")
         except Exception as e:
             print(f"Could not load HellaSwag: {e}")
             return BenchmarkResult("hellaswag", 0.0, 0, 0)
@@ -165,7 +165,7 @@ class GemmaEvaluator:
         """Evaluate on PIQA (physical intuition)."""
         try:
             from datasets import load_dataset
-            dataset = load_dataset("piqa", split="validation", trust_remote_code=True)
+            dataset = load_dataset("ybisk/piqa", split="validation")
         except Exception as e:
             print(f"Could not load PIQA: {e}")
             return BenchmarkResult("piqa", 0.0, 0, 0)
@@ -192,7 +192,7 @@ class GemmaEvaluator:
         """Evaluate on ARC-Easy (science questions)."""
         try:
             from datasets import load_dataset
-            dataset = load_dataset("ai2_arc", "ARC-Easy", split="test", trust_remote_code=True)
+            dataset = load_dataset("allenai/ai2_arc", "ARC-Easy", split="test")
         except Exception as e:
             print(f"Could not load ARC-Easy: {e}")
             return BenchmarkResult("arc_easy", 0.0, 0, 0)
@@ -221,7 +221,7 @@ class GemmaEvaluator:
         """Evaluate on WinoGrande (pronoun resolution)."""
         try:
             from datasets import load_dataset
-            dataset = load_dataset("winogrande", "winogrande_xl", split="validation", trust_remote_code=True)
+            dataset = load_dataset("allenai/winogrande", "winogrande_xl", split="validation")
         except Exception as e:
             print(f"Could not load WinoGrande: {e}")
             return BenchmarkResult("winogrande", 0.0, 0, 0)
