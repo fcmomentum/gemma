@@ -24,6 +24,10 @@ parser.add_argument('--max-examples', type=int, default=100000,
                     help='Maximum training examples (default: 100000)')
 parser.add_argument('--checkpoint-every', type=int, default=500,
                     help='Save checkpoint every N steps (default: 500)')
+parser.add_argument('--no-memory-loss', action='store_true',
+                    help='Disable memory loss (for baseline comparison)')
+parser.add_argument('--memory-weight', type=float, default=0.1,
+                    help='Memory loss weight (default: 0.1)')
 args = parser.parse_args()
 
 # Don't force JAX_PLATFORMS - let it auto-detect TPU/GPU/CPU
@@ -191,7 +195,9 @@ def memory_reconstruction_loss(hidden_states, window_size: int = 512):
 optimizer = optax.adafactor(learning_rate=1e-4)
 opt_state = optimizer.init(params)
 
-MEMORY_LOSS_WEIGHT = 0.1
+# Memory loss weight (0 disables memory loss entirely)
+MEMORY_LOSS_WEIGHT = 0.0 if args.no_memory_loss else args.memory_weight
+print(f"Memory loss weight: {MEMORY_LOSS_WEIGHT}" + (" (DISABLED)" if args.no_memory_loss else ""))
 EFFECTIVE_WINDOW = min(WINDOW_SIZE, MAX_LENGTH // 2)  # Adjust for our sequence length
 
 @functools.partial(jax.jit, donate_argnums=(0, 1))
