@@ -33,6 +33,12 @@ args = parser.parse_args()
 # Don't force JAX_PLATFORMS - let it auto-detect TPU/GPU/CPU
 # The system needs libtpu.so for TPU (only available in system Python, not uv venv)
 
+# Enable JAX compilation cache for faster startup on resume
+import os
+jax_cache_dir = "/kaggle/working/jax_cache"
+os.makedirs(jax_cache_dir, exist_ok=True)
+os.environ["JAX_COMPILATION_CACHE_DIR"] = jax_cache_dir
+
 import jax
 import jax.numpy as jnp
 import optax
@@ -138,13 +144,6 @@ print(f"Created {len(examples):,} training examples")
 # === Load Model and Handle Resume ===
 model = gm.nn.Gemma3_1B(tokens="input")
 
-# Always load pretrained weights for baseline comparison
-# Using PT (pretrained) model for language modeling, not IT (instruction-tuned)
-baseline_params = gm.ckpts.load_params(
-    path=gm.ckpts.CheckpointPath.GEMMA3_1B_PT,
-)
-print("Baseline params loaded (original Gemma3 1B PT)")
-
 # Check for resume from checkpoint
 start_step = 0
 if args.resume and os.path.exists(args.resume):
@@ -158,9 +157,12 @@ if args.resume and os.path.exists(args.resume):
         start_step = 0
     print(f"Resuming from step {start_step}")
 else:
-    # Use pretrained weights for training (copy of baseline)
-    params = jax.tree.map(lambda x: x.copy(), baseline_params)
-    print("Starting training from pretrained Gemma3 1B")
+    # Load pretrained weights for training
+    # Using PT (pretrained) model for language modeling, not IT (instruction-tuned)
+    params = gm.ckpts.load_params(
+        path=gm.ckpts.CheckpointPath.GEMMA3_1B_PT,
+    )
+    print("Loaded pretrained Gemma3 1B PT")
 
 # === Define Loss Functions ===
 def cross_entropy_loss(logits, targets, mask):
@@ -320,14 +322,18 @@ def quick_evaluate(params):
     return {"xent": avg_xent, "mem_loss": avg_mem_loss, "perplexity": perplexity}
 
 # === Evaluate Baseline Before Training ===
-print("\n--- Baseline Evaluation (Before Training) ---")
-baseline_metrics = quick_evaluate(baseline_params)
-wandb.log({
-    "baseline/xent": baseline_metrics["xent"],
-    "baseline/mem_loss": baseline_metrics["mem_loss"],
-    "baseline/perplexity": baseline_metrics["perplexity"],
-})
-print(f"Baseline perplexity: {baseline_metrics['perplexity']:.2f}")
+# At step 0, params == baseline (pretrained model)
+if start_step == 0:
+    print("\n--- Baseline Evaluation (Before Training) ---")
+    baseline_metrics_initial = quick_evaluate(params)
+    wandb.log({
+        "baseline/xent": baseline_metrics_initial["xent"],
+        "baseline/mem_loss": baseline_metrics_initial["mem_loss"],
+        "baseline/perplexity": baseline_metrics_initial["perplexity"],
+    })
+    print(f"Baseline perplexity: {baseline_metrics_initial['perplexity']:.2f}")
+else:
+    print("\n(Skipping baseline eval - resuming from checkpoint)")
 
 print(f"\nStarting training from step {start_step}...")
 step = start_step
@@ -381,12 +387,21 @@ print(f"Training complete! Total steps: {step}")
 save_checkpoint(params, step)
 print(f"Final checkpoint saved!")
 
+# Reload baseline for final comparison (to save memory during training)
+print("\n--- Loading baseline for final comparison ---")
+baseline_params = gm.ckpts.load_params(
+    path=gm.ckpts.CheckpointPath.GEMMA3_1B_PT,
+)
+
 # Evaluate baseline (original Gemma3 1B)
-print("\n--- Final Evaluation: Baseline (Original Gemma3 1B) ---")
+print("\n--- Final Evaluation: Baseline (Original Gemma3 1B PT) ---")
 baseline_metrics = quick_evaluate(baseline_params)
 
+# Free baseline params memory
+del baseline_params
+
 # Evaluate trained model
-print("\n--- Final Evaluation: Trained Model (Memory Fine-tuned) ---")
+print("\n--- Final Evaluation: Trained Model ---")
 trained_metrics = quick_evaluate(params)
 
 # Compare results
