@@ -13,13 +13,21 @@ import glob
 import functools
 from typing import Iterator
 
+# Initialize TPU before importing JAX
+os.environ['JAX_PLATFORMS'] = 'tpu,cpu'
+
 import jax
 import jax.numpy as jnp
 import optax
 import numpy as np
 
+# Check devices - should show TPU
 print(f"JAX devices: {jax.devices()}")
 print(f"Device count: {jax.device_count()}")
+print(f"Default backend: {jax.default_backend()}")
+
+if jax.default_backend() != 'tpu':
+    print("WARNING: Not running on TPU! Training will be slow.")
 
 # Initialize WandB (uses WANDB_API_KEY from environment)
 import wandb
@@ -226,9 +234,12 @@ print(f"Training complete! Total steps: {step}")
 
 # === Save Checkpoint ===
 import pickle
-with open("/kaggle/working/memory_trained_params.pkl", "wb") as f:
-    pickle.dump(params, f)
-print("Checkpoint saved!")
+checkpoint_dir = "/kaggle/working/checkpoint"
+os.makedirs(checkpoint_dir, exist_ok=True)
+checkpoint_path = os.path.join(checkpoint_dir, "memory_trained_params.pkl")
+with open(checkpoint_path, "wb") as f:
+    pickle.dump(jax.device_get(params), f)  # Move to CPU before saving
+print(f"Checkpoint saved to {checkpoint_path}!")
 
 # === Test Generation ===
 def generate(prompt: str, max_new_tokens: int = 50):
