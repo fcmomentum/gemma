@@ -206,6 +206,7 @@ def batch_examples(examples: list, batch_size: int) -> Iterator[dict]:
 NUM_EPOCHS = 1
 LOG_EVERY = 10
 CHECKPOINT_EVERY = 500  # Save checkpoint every N steps
+MAX_CHECKPOINTS = 3     # Keep only this many checkpoints (rolling)
 
 # Prepare checkpoint directory
 import pickle
@@ -213,11 +214,18 @@ checkpoint_dir = "/kaggle/working/checkpoint"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 def save_checkpoint(params, step):
-    """Save checkpoint with step number."""
+    """Save checkpoint with rolling deletion of old ones."""
     checkpoint_path = os.path.join(checkpoint_dir, f"params_step_{step}.pkl")
     with open(checkpoint_path, "wb") as f:
         pickle.dump(jax.device_get(params), f)
     print(f"Checkpoint saved: {checkpoint_path}")
+
+    # Rolling checkpoint: delete old checkpoints
+    checkpoints = sorted(glob.glob(os.path.join(checkpoint_dir, "params_step_*.pkl")))
+    while len(checkpoints) > MAX_CHECKPOINTS:
+        old_ckpt = checkpoints.pop(0)
+        os.remove(old_ckpt)
+        print(f"Deleted old checkpoint: {old_ckpt}")
 
 print("Starting training...")
 step = 0
