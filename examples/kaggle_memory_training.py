@@ -134,6 +134,13 @@ print(f"Created {len(examples):,} training examples")
 # === Load Model and Handle Resume ===
 model = gm.nn.Gemma3_1B(tokens="input")
 
+# Always load pretrained weights for baseline comparison
+# Using PT (pretrained) model for language modeling, not IT (instruction-tuned)
+baseline_params = gm.ckpts.load_params(
+    path=gm.ckpts.CheckpointPath.GEMMA3_1B_PT,
+)
+print("Baseline params loaded (original Gemma3 1B PT)")
+
 # Check for resume from checkpoint
 start_step = 0
 if args.resume and os.path.exists(args.resume):
@@ -147,15 +154,9 @@ if args.resume and os.path.exists(args.resume):
         start_step = 0
     print(f"Resuming from step {start_step}")
 else:
-    # Load pretrained weights
-    params = gm.ckpts.load_params(
-        path=gm.ckpts.CheckpointPath.GEMMA3_1B_IT,
-    )
-    print("Gemma3 1B loaded successfully!")
-
-# Save baseline params for comparison after training
-baseline_params = jax.tree.map(lambda x: x.copy(), params)
-print("Baseline params saved for evaluation comparison")
+    # Use pretrained weights for training (copy of baseline)
+    params = jax.tree.map(lambda x: x.copy(), baseline_params)
+    print("Starting training from pretrained Gemma3 1B")
 
 # === Define Loss Functions ===
 def cross_entropy_loss(logits, targets, mask):
