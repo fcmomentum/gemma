@@ -78,7 +78,7 @@ def load_pg19_books(split: str = "train", max_books: int = None) -> list[str]:
     return texts
 
 # Load a subset for testing
-train_texts = load_pg19_books("train", max_books=100)  # Start small
+train_texts = load_pg19_books("train", max_books=None)  # Start small
 print(f"Total characters: {sum(len(t) for t in train_texts):,}")
 
 # === Tokenizer and Data Processing ===
@@ -87,7 +87,7 @@ from gemma import gm
 tokenizer = gm.text.Gemma3Tokenizer()  # Use Gemma3 tokenizer
 
 # Configuration for Gemma3 1B
-MAX_LENGTH = 1024  # Sequence length (must be > window_size for memory loss)
+MAX_LENGTH = 2048  # Sequence length (must be > window_size for memory loss)
 WINDOW_SIZE = 512   # Gemma3 1B sliding window
 BATCH_SIZE = 8      # Larger batch for smaller model
 
