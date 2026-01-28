@@ -11,7 +11,8 @@
 # ## Cell 1: Install Dependencies
 
 # %%
-# !pip install -q gemma flax optax jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+# !pip install -q gemma flax optax wandb
+# !pip install -q jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 
 # %% [markdown]
 # ## Cell 2: Imports and Device Check
@@ -30,6 +31,21 @@ import numpy as np
 print(f"JAX devices: {jax.devices()}")
 print(f"Device count: {jax.device_count()}")
 
+# Initialize WandB
+import wandb
+wandb.login()  # Will prompt for API key on first run
+wandb.init(
+    project="gemma-memory",
+    name="pg19-splitbrain",
+    config={
+        "model": "Gemma3_1B",
+        "max_length": 1024,
+        "batch_size": 8,
+        "memory_loss_weight": 0.1,
+        "window_size": 512,
+    }
+)
+
 # %% [markdown]
 # ## Cell 3: Load PG-19 Dataset from Kaggle
 
@@ -38,24 +54,30 @@ PG19_PATH = "/kaggle/input/the-pg19-language-modeling-benchmark-dataset"
 
 def load_pg19_books(split: str = "train", max_books: int = None) -> list[str]:
     """Load book texts from PG-19 dataset."""
-    # Try common directory structures
-    possible_paths = [
-        os.path.join(PG19_PATH, split),
-        os.path.join(PG19_PATH, f"{split}.txt"),
-        PG19_PATH,
-    ]
+    split_path = os.path.join(PG19_PATH, split)
+    print(f"Looking for books in: {split_path}")
 
+    # List immediate files and subdirs
+    if os.path.exists(split_path):
+        print(f"Contents: {os.listdir(split_path)[:10]}...")
+
+    # Find all txt files recursively (handles nested structure)
     texts = []
-    for path in possible_paths:
-        if os.path.isdir(path):
-            files = glob.glob(os.path.join(path, "*.txt"))
-            for f in files[:max_books] if max_books else files:
-                with open(f, 'r', encoding='utf-8', errors='ignore') as fp:
-                    texts.append(fp.read())
-            break
-        elif os.path.isfile(path):
-            with open(path, 'r', encoding='utf-8', errors='ignore') as fp:
-                texts.append(fp.read())
+    for root, dirs, files in os.walk(split_path):
+        for f in files:
+            if f.endswith('.txt'):
+                filepath = os.path.join(root, f)
+                try:
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as fp:
+                        content = fp.read()
+                        if len(content) > 1000:  # Skip very short files
+                            texts.append(content)
+                except Exception as e:
+                    print(f"Error reading {filepath}: {e}")
+
+                if max_books and len(texts) >= max_books:
+                    break
+        if max_books and len(texts) >= max_books:
             break
 
     print(f"Loaded {len(texts)} books from {split}")
@@ -71,12 +93,12 @@ print(f"Total characters: {sum(len(t) for t in train_texts):,}")
 # %%
 from gemma import gm
 
-tokenizer = gm.text.Gemma2Tokenizer()  # Use Gemma2 tokenizer
+tokenizer = gm.text.Gemma3Tokenizer()  # Use Gemma3 tokenizer
 
-# Configuration
-MAX_LENGTH = 2048  # Sequence length (adjust based on TPU memory)
-WINDOW_SIZE = 4096  # Gemma2 sliding window (for reference)
-BATCH_SIZE = 4      # Small batch for TPU memory
+# Configuration for Gemma3 1B
+MAX_LENGTH = 1024  # Sequence length (must be > window_size for memory loss)
+WINDOW_SIZE = 512   # Gemma3 1B sliding window
+BATCH_SIZE = 8      # Larger batch for smaller model
 
 def create_training_examples(texts: list[str], max_length: int) -> Iterator[dict]:
     """Convert book texts to training examples."""
@@ -116,14 +138,14 @@ def batch_examples(examples: list, batch_size: int) -> Iterator[dict]:
 # Import the memory modules (copy these files to Kaggle or install gemma with memory support)
 # For now, we'll use standard Gemma2 and add memory loss manually
 
-model = gm.nn.Gemma2_2B(tokens="input")
+model = gm.nn.Gemma3_1B(tokens="input")
 
 # Load pretrained weights
+# Note: load_params takes path only, not model
 params = gm.ckpts.load_params(
-    path=gm.ckpts.CheckpointPath.GEMMA2_2B_IT,
-    model=model,
+    path=gm.ckpts.CheckpointPath.GEMMA3_1B_IT,
 )
-print("Model loaded successfully!")
+print("Gemma3 1B loaded successfully!")
 
 # %% [markdown]
 # ## Cell 6: Define Loss Functions
@@ -223,8 +245,16 @@ for epoch in range(NUM_EPOCHS):
         params, opt_state, metrics = train_step(params, opt_state, batch)
 
         if step % LOG_EVERY == 0:
+            # Log to console
             print(f"Step {step}: loss={metrics['loss']:.4f}, "
                   f"xent={metrics['xent']:.4f}, mem_loss={metrics['mem_loss']:.4f}")
+            # Log to WandB
+            wandb.log({
+                "loss": float(metrics['loss']),
+                "xent": float(metrics['xent']),
+                "mem_loss": float(metrics['mem_loss']),
+                "step": step,
+            })
 
         step += 1
 
