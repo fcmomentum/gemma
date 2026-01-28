@@ -11,7 +11,20 @@
 import os
 import glob
 import functools
+import argparse
 from typing import Iterator
+
+# Parse command line arguments
+parser = argparse.ArgumentParser(description='Split-Brain Memory Training for Gemma')
+parser.add_argument('--resume', type=str, default=None,
+                    help='Path to checkpoint file to resume from')
+parser.add_argument('--max-books', type=int, default=1000,
+                    help='Maximum number of books to load (default: 1000)')
+parser.add_argument('--max-examples', type=int, default=100000,
+                    help='Maximum training examples (default: 100000)')
+parser.add_argument('--checkpoint-every', type=int, default=500,
+                    help='Save checkpoint every N steps (default: 500)')
+args = parser.parse_args()
 
 # Don't force JAX_PLATFORMS - let it auto-detect TPU/GPU/CPU
 # The system needs libtpu.so for TPU (only available in system Python, not uv venv)
@@ -20,6 +33,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import numpy as np
+import pickle
 
 # Check devices
 print(f"JAX devices: {jax.devices()}")
@@ -78,8 +92,7 @@ def load_pg19_books(split: str = "train", max_books: int = None) -> list[str]:
     return texts
 
 # Load a subset for training (full dataset is 28K books, 11GB - too slow to tokenize)
-MAX_BOOKS = 1000  # Limit books for practical training time
-train_texts = load_pg19_books("train", max_books=MAX_BOOKS)
+train_texts = load_pg19_books("train", max_books=args.max_books)
 print(f"Total characters: {sum(len(t) for t in train_texts):,}")
 
 # === Tokenizer and Data Processing ===
@@ -92,7 +105,6 @@ tokenizer = gm.text.Gemma3Tokenizer()  # Use Gemma3 tokenizer
 MAX_LENGTH = 1024  # Sequence length (must be > window_size for memory loss)
 WINDOW_SIZE = 512   # Gemma3 1B sliding window
 BATCH_SIZE = 8      # Larger batch for smaller model
-MAX_EXAMPLES = 100000  # Limit total examples to cap training time
 
 def create_training_examples(texts: list[str], max_length: int, max_examples: int = None) -> Iterator[dict]:
     """Convert book texts to training examples with progress tracking."""
@@ -115,18 +127,35 @@ def create_training_examples(texts: list[str], max_length: int, max_examples: in
             count += 1
 
 # Create examples with progress bar
-print(f"Creating training examples (max {MAX_EXAMPLES:,})...")
-examples = list(create_training_examples(train_texts, MAX_LENGTH, MAX_EXAMPLES))
+print(f"Creating training examples (max {args.max_examples:,})...")
+examples = list(create_training_examples(train_texts, MAX_LENGTH, args.max_examples))
 print(f"Created {len(examples):,} training examples")
 
-# === Load Split-Brain Memory Model ===
+# === Load Model and Handle Resume ===
 model = gm.nn.Gemma3_1B(tokens="input")
 
-# Load pretrained weights
-params = gm.ckpts.load_params(
-    path=gm.ckpts.CheckpointPath.GEMMA3_1B_IT,
-)
-print("Gemma3 1B loaded successfully!")
+# Check for resume from checkpoint
+start_step = 0
+if args.resume and os.path.exists(args.resume):
+    print(f"Resuming from checkpoint: {args.resume}")
+    with open(args.resume, "rb") as f:
+        params = pickle.load(f)
+    # Extract step number from filename (e.g., params_step_5000.pkl)
+    try:
+        start_step = int(args.resume.split("_step_")[1].replace(".pkl", ""))
+    except:
+        start_step = 0
+    print(f"Resuming from step {start_step}")
+else:
+    # Load pretrained weights
+    params = gm.ckpts.load_params(
+        path=gm.ckpts.CheckpointPath.GEMMA3_1B_IT,
+    )
+    print("Gemma3 1B loaded successfully!")
+
+# Save baseline params for comparison after training
+baseline_params = jax.tree.map(lambda x: x.copy(), params)
+print("Baseline params saved for evaluation comparison")
 
 # === Define Loss Functions ===
 def cross_entropy_loss(logits, targets, mask):
@@ -213,11 +242,9 @@ def batch_examples(examples: list, batch_size: int) -> Iterator[dict]:
 # === Training Loop ===
 NUM_EPOCHS = 1
 LOG_EVERY = 10
-CHECKPOINT_EVERY = 500  # Save checkpoint every N steps
 MAX_CHECKPOINTS = 3     # Keep only this many checkpoints (rolling)
 
 # Prepare checkpoint directory
-import pickle
 checkpoint_dir = "/kaggle/working/checkpoint"
 os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -235,11 +262,54 @@ def save_checkpoint(params, step):
         os.remove(old_ckpt)
         print(f"Deleted old checkpoint: {old_ckpt}")
 
-print("Starting training...")
-step = 0
+# === Pre-load Test Set for Periodic Evaluation ===
+print("Loading test set for evaluation...")
+test_texts = load_pg19_books("test", max_books=50)
+test_examples = list(create_training_examples(test_texts, MAX_LENGTH, max_examples=500))
+print(f"Test set: {len(test_examples)} examples")
+
+@jax.jit
+def compute_loss(params, batch):
+    """Compute loss without updating params."""
+    output = model.apply(
+        {'params': params},
+        batch['input'],
+        return_hidden_states=True,
+    )
+    xent = cross_entropy_loss(output.logits, batch['target'], batch['loss_mask'])
+    mem_loss = memory_reconstruction_loss(output.hidden_states, window_size=EFFECTIVE_WINDOW)
+    return xent, mem_loss
+
+def quick_evaluate(params):
+    """Quick evaluation on test set (fewer examples for speed)."""
+    total_xent = 0.0
+    total_mem_loss = 0.0
+    num_batches = 0
+
+    # Use a copy to avoid modifying test_examples
+    for batch in batch_examples(test_examples.copy(), BATCH_SIZE):
+        batch = {k: jnp.array(v) for k, v in batch.items()}
+        xent, mem_loss = compute_loss(params, batch)
+        total_xent += float(xent)
+        total_mem_loss += float(mem_loss)
+        num_batches += 1
+
+    avg_xent = total_xent / max(num_batches, 1)
+    avg_mem_loss = total_mem_loss / max(num_batches, 1)
+    perplexity = np.exp(avg_xent)
+
+    print(f"  Perplexity: {perplexity:.2f}, XEnt: {avg_xent:.4f}, MemLoss: {avg_mem_loss:.4f}")
+    return {"xent": avg_xent, "mem_loss": avg_mem_loss, "perplexity": perplexity}
+
+print(f"Starting training from step {start_step}...")
+step = start_step
 
 for epoch in range(NUM_EPOCHS):
     for batch in batch_examples(examples, BATCH_SIZE):
+        # Skip batches if resuming
+        if step > start_step:
+            pass  # Continue normally
+
         # Convert to JAX arrays
         batch = {k: jnp.array(v) for k, v in batch.items()}
 
@@ -261,25 +331,62 @@ for epoch in range(NUM_EPOCHS):
                 "step": step,
             })
 
-        # Periodic checkpoint
-        if step > 0 and step % CHECKPOINT_EVERY == 0:
+        # Periodic checkpoint + evaluation
+        if step > 0 and step % args.checkpoint_every == 0:
             save_checkpoint(params, step)
+
+            # Periodic evaluation
+            print(f"\n--- Evaluation at step {step} ---")
+            eval_metrics = quick_evaluate(params)
+            wandb.log({
+                "eval/xent": eval_metrics["xent"],
+                "eval/mem_loss": eval_metrics["mem_loss"],
+                "eval/perplexity": eval_metrics["perplexity"],
+                "step": step,
+            })
 
         step += 1
 
 print(f"Training complete! Total steps: {step}")
 
-# === Save Checkpoint ===
-import pickle
-checkpoint_dir = "/kaggle/working/checkpoint"
-os.makedirs(checkpoint_dir, exist_ok=True)
-checkpoint_path = os.path.join(checkpoint_dir, "memory_trained_params.pkl")
-with open(checkpoint_path, "wb") as f:
-    pickle.dump(jax.device_get(params), f)  # Move to CPU before saving
-print(f"Checkpoint saved to {checkpoint_path}!")
+# === Save Final Checkpoint ===
+save_checkpoint(params, step)
+print(f"Final checkpoint saved!")
+
+# Evaluate baseline (original Gemma3 1B)
+print("\n--- Final Evaluation: Baseline (Original Gemma3 1B) ---")
+baseline_metrics = quick_evaluate(baseline_params)
+
+# Evaluate trained model
+print("\n--- Final Evaluation: Trained Model (Memory Fine-tuned) ---")
+trained_metrics = quick_evaluate(params)
+
+# Compare results
+print("\n" + "="*50)
+print("COMPARISON: Baseline vs Trained")
+print("="*50)
+ppl_delta = trained_metrics["perplexity"] - baseline_metrics["perplexity"]
+ppl_improvement = (baseline_metrics["perplexity"] - trained_metrics["perplexity"]) / baseline_metrics["perplexity"] * 100
+print(f"  Baseline Perplexity:  {baseline_metrics['perplexity']:.2f}")
+print(f"  Trained Perplexity:   {trained_metrics['perplexity']:.2f}")
+print(f"  Delta:                {ppl_delta:+.2f}")
+print(f"  Improvement:          {ppl_improvement:+.1f}%")
+
+# Log final metrics to WandB
+wandb.log({
+    "baseline/xent": baseline_metrics["xent"],
+    "baseline/mem_loss": baseline_metrics["mem_loss"],
+    "baseline/perplexity": baseline_metrics["perplexity"],
+    "trained/xent": trained_metrics["xent"],
+    "trained/mem_loss": trained_metrics["mem_loss"],
+    "trained/perplexity": trained_metrics["perplexity"],
+    "comparison/perplexity_delta": ppl_delta,
+    "comparison/perplexity_improvement_pct": ppl_improvement,
+})
 
 # === Test Generation ===
-def generate(prompt: str, max_new_tokens: int = 50):
+print("\n=== Sample Generation ===")
+def generate(prompt: str, max_new_tokens: int = 100):
     """Generate text from prompt."""
     input_ids = tokenizer.encode(prompt)
     input_ids = jnp.array([input_ids])
@@ -291,9 +398,11 @@ def generate(prompt: str, max_new_tokens: int = 50):
 
     return tokenizer.decode(input_ids[0].tolist())
 
-# Test
-prompt = "Once upon a time in a distant kingdom,"
-print(generate(prompt))
+# Test with a book-style prompt
+prompt = "Once upon a time in a distant kingdom, there lived a young prince named"
+print(f"Prompt: {prompt}")
+print(f"Generated: {generate(prompt)}")
 
 # Finish WandB run
 wandb.finish()
+print("\nDone!")
