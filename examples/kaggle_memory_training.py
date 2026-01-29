@@ -429,7 +429,7 @@ test_texts = load_dataset_texts(args.dataset, "test", 50)
 test_examples = list(create_training_examples(test_texts, MAX_LENGTH, max_examples=500))
 print(f"Test set: {len(test_examples)} examples")
 
-@jax.jit
+# Non-jitted for debugging/stability
 def compute_loss(params, batch):
     """Compute loss without updating params."""
     output = model.apply(
