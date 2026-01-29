@@ -485,7 +485,8 @@ def quick_evaluate(params):
 
 # === Evaluate Baseline Before Training ===
 # At step 0, params == baseline (pretrained model)
-if start_step == 0:
+# TEMPORARILY DISABLED - baseline eval was hanging
+if False and start_step == 0:
     print("\n--- Baseline Evaluation (Before Training) ---")
     baseline_metrics_initial = quick_evaluate(params)
     wandb.log({
@@ -495,9 +496,10 @@ if start_step == 0:
     })
     print(f"Baseline perplexity: {baseline_metrics_initial['perplexity']:.2f}")
 else:
-    print("\n(Skipping baseline eval - resuming from checkpoint)")
+    print("\n(Skipping baseline eval for faster startup)")
 
 print(f"\nStarting training from step {start_step}...")
+print("NOTE: First step will take 2-5 minutes for JIT compilation...")
 step = start_step
 
 for epoch in range(NUM_EPOCHS):
