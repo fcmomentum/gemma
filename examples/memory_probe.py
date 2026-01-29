@@ -39,6 +39,8 @@ parser.add_argument('--num-trials', type=int, default=50,
                     help='Number of trials per distance')
 parser.add_argument('--max-context', type=int, default=2048,
                     help='Maximum context length to test')
+parser.add_argument('--single-gpu', action='store_true',
+                    help='Force single GPU mode (avoids pmap issues)')
 args = parser.parse_args()
 
 # Import Gemma
@@ -126,17 +128,18 @@ class MemoryProbe:
         "The mountain path was steep and winding.",
     ]
 
-    def __init__(self, params, model, tokenizer):
+    def __init__(self, params, model, tokenizer, use_pmap=False):
         self.params = params
         self.model = model
         self.tokenizer = tokenizer
+        self.use_pmap = use_pmap
 
         # Detect available devices
         self.devices = jax.devices()
         self.n_devices = len(self.devices)
-        print(f"Using {self.n_devices} device(s): {[d.platform for d in self.devices]}")
+        print(f"Detected {self.n_devices} device(s): {[d.platform for d in self.devices]}")
 
-        # JIT compile forward pass (single device)
+        # JIT compile forward pass (works on any device)
         @jax.jit
         def _get_logits(params, input_ids):
             output = model.apply({'params': params}, input_ids)
@@ -144,8 +147,8 @@ class MemoryProbe:
 
         self._get_logits_fn = _get_logits
 
-        # For multi-GPU: pmap version (data parallelism)
-        if self.n_devices > 1:
+        # pmap is experimental and may hang - disabled by default
+        if use_pmap and self.n_devices > 1:
             # Replicate params across devices
             self.replicated_params = jax.device_put_replicated(params, self.devices)
 
@@ -155,10 +158,12 @@ class MemoryProbe:
                 return output.logits
 
             self._get_logits_parallel_fn = _get_logits_parallel
-            print(f"Multi-GPU mode enabled with pmap")
+            print(f"Multi-GPU pmap mode enabled (experimental)")
         else:
             self.replicated_params = None
             self._get_logits_parallel_fn = None
+            if self.n_devices > 1:
+                print(f"Using single-GPU batched mode (use --use-pmap for multi-GPU)")
 
     def get_logits(self, input_ids):
         """Get model logits for input."""
@@ -364,8 +369,8 @@ class MemoryProbe:
             max_len = max(len(s) for s in all_sequences)
             padded = [s + [0] * (max_len - len(s)) for s in all_sequences]
 
-            # Use pmap if multiple devices available
-            if self.n_devices > 1 and len(padded) >= self.n_devices:
+            # Use pmap only if explicitly enabled AND available
+            if self.use_pmap and self._get_logits_parallel_fn is not None and len(padded) >= self.n_devices:
                 # Pad batch to be divisible by n_devices
                 while len(padded) % self.n_devices != 0:
                     padded.append(padded[0])
@@ -378,7 +383,7 @@ class MemoryProbe:
                 logits = self._get_logits_parallel_fn(self.replicated_params, stacked)
                 logits = logits.reshape(-1, logits.shape[-2], logits.shape[-1])
             else:
-                # Single GPU fallback
+                # Single GPU batched - reliable and fast
                 batch_input = jnp.array(padded)
                 logits = self._get_logits_fn(self.params, batch_input)
 
@@ -454,8 +459,9 @@ def main():
         print("\nLoading baseline Gemma3 1B PT...")
         params = gm.ckpts.load_params(path=gm.ckpts.CheckpointPath.GEMMA3_1B_PT)
 
-    # Create probe
-    probe = MemoryProbe(params, model, tokenizer)
+    # Create probe (single-gpu mode by default for reliability)
+    use_pmap = not args.single_gpu and len(jax.devices()) > 1
+    probe = MemoryProbe(params, model, tokenizer, use_pmap=False)  # pmap disabled - was hanging
 
     # Test at various distances
     # Key distances: within window (256, 512), at boundary (512-768), beyond (1024, 1536, 2048)
