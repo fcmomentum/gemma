@@ -45,6 +45,7 @@ args = parser.parse_args()
 
 # Enable JAX compilation cache for faster startup on resume
 import os
+import pickle
 jax_cache_dir = "/kaggle/working/jax_cache"
 os.makedirs(jax_cache_dir, exist_ok=True)
 os.environ["JAX_COMPILATION_CACHE_DIR"] = jax_cache_dir
@@ -194,9 +195,37 @@ def create_training_examples(texts: list[str], max_length: int, max_examples: in
             }
             count += 1
 
-# Create examples with progress bar
-print(f"Creating training examples (max {args.max_examples:,})...")
-examples = list(create_training_examples(train_texts, MAX_LENGTH, args.max_examples))
+def get_cached_examples(split: str, texts: list[str], max_length: int, max_examples: int) -> list[dict]:
+    """Get examples from cache or create them."""
+    cache_file = f"dataset_{args.dataset}_{split}_cache.pkl"
+
+    if os.path.exists(cache_file):
+        print(f"Loading cached dataset from {cache_file}...")
+        try:
+            with open(cache_file, "rb") as f:
+                examples = pickle.load(f)
+            print(f"Loaded {len(examples):,} examples from cache")
+            # Enforce max_examples if cached version has more
+            if max_examples and len(examples) > max_examples:
+                examples = examples[:max_examples]
+            return examples
+        except Exception as e:
+            print(f"Failed to load cache: {e}. Recreating...")
+
+    # Check if max_examples is effectively infinite (None or very large)
+    limit = max_examples if max_examples else float('inf')
+
+    print(f"Creating training examples (max {max_examples if max_examples else 'all':,})...")
+    examples = list(create_training_examples(texts, max_length, max_examples))
+
+    print(f"Saving {len(examples):,} examples to {cache_file}...")
+    with open(cache_file, "wb") as f:
+        pickle.dump(examples, f)
+
+    return examples
+
+# Create examples with caching
+examples = get_cached_examples("train", train_texts, MAX_LENGTH, args.max_examples)
 print(f"Created {len(examples):,} training examples")
 
 # === Load Model and Handle Resume ===
@@ -426,7 +455,7 @@ def save_checkpoint(params, step):
 # === Pre-load Test Set for Periodic Evaluation ===
 print("Loading test set for evaluation...")
 test_texts = load_dataset_texts(args.dataset, "test", 50)
-test_examples = list(create_training_examples(test_texts, MAX_LENGTH, max_examples=500))
+test_examples = get_cached_examples("test", test_texts, MAX_LENGTH, max_examples=500)
 print(f"Test set: {len(test_examples)} examples")
 
 # Non-jitted for debugging/stability
