@@ -58,43 +58,49 @@ class ProbeResult:
 class MemoryProbe:
     """Probe for testing long-context memory."""
 
-    # Diverse needle facts (name -> fact pairs)
+    # Needle facts organized by category for multiple-choice
+    # Format: (name, answer, needle_sentence, question, distractors)
     NEEDLE_FACTS = [
-        ("Alice", "engineer", "Alice works as an engineer."),
-        ("Bob", "Paris", "Bob lives in Paris."),
-        ("Carol", "piano", "Carol plays the piano."),
-        ("David", "42", "David's favorite number is 42."),
-        ("Emma", "blue", "Emma's favorite color is blue."),
-        ("Frank", "doctor", "Frank is a doctor."),
-        ("Grace", "Tokyo", "Grace visited Tokyo."),
-        ("Henry", "chef", "Henry works as a chef."),
-        ("Iris", "violin", "Iris plays the violin."),
-        ("Jack", "99", "Jack's lucky number is 99."),
-        ("Kate", "green", "Kate's favorite color is green."),
-        ("Leo", "teacher", "Leo is a teacher."),
-        ("Maya", "London", "Maya lives in London."),
-        ("Noah", "guitar", "Noah plays the guitar."),
-        ("Olivia", "7", "Olivia's favorite number is 7."),
-    ]
+        # Professions
+        ("Alice", "engineer", "Alice works as an engineer.",
+         "What is Alice's profession?", ["doctor", "teacher", "chef"]),
+        ("Frank", "doctor", "Frank is a doctor.",
+         "What is Frank's profession?", ["engineer", "teacher", "chef"]),
+        ("Henry", "chef", "Henry works as a chef.",
+         "What is Henry's profession?", ["engineer", "doctor", "teacher"]),
+        ("Leo", "teacher", "Leo is a teacher.",
+         "What is Leo's profession?", ["engineer", "doctor", "chef"]),
 
-    # Question templates
-    QUESTIONS = {
-        "engineer": "What is Alice's profession?",
-        "Paris": "Where does Bob live?",
-        "piano": "What instrument does Carol play?",
-        "42": "What is David's favorite number?",
-        "blue": "What is Emma's favorite color?",
-        "doctor": "What is Frank's profession?",
-        "Tokyo": "What city did Grace visit?",
-        "chef": "What is Henry's profession?",
-        "violin": "What instrument does Iris play?",
-        "99": "What is Jack's lucky number?",
-        "green": "What is Kate's favorite color?",
-        "teacher": "What is Leo's profession?",
-        "London": "Where does Maya live?",
-        "guitar": "What instrument does Noah play?",
-        "7": "What is Olivia's favorite number?",
-    }
+        # Cities
+        ("Bob", "Paris", "Bob lives in Paris.",
+         "Where does Bob live?", ["London", "Tokyo", "Berlin"]),
+        ("Grace", "Tokyo", "Grace visited Tokyo.",
+         "What city did Grace visit?", ["Paris", "London", "Berlin"]),
+        ("Maya", "London", "Maya lives in London.",
+         "Where does Maya live?", ["Paris", "Tokyo", "Berlin"]),
+
+        # Instruments
+        ("Carol", "piano", "Carol plays the piano.",
+         "What instrument does Carol play?", ["violin", "guitar", "drums"]),
+        ("Iris", "violin", "Iris plays the violin.",
+         "What instrument does Iris play?", ["piano", "guitar", "drums"]),
+        ("Noah", "guitar", "Noah plays the guitar.",
+         "What instrument does Noah play?", ["piano", "violin", "drums"]),
+
+        # Colors
+        ("Emma", "blue", "Emma's favorite color is blue.",
+         "What is Emma's favorite color?", ["green", "red", "yellow"]),
+        ("Kate", "green", "Kate's favorite color is green.",
+         "What is Kate's favorite color?", ["blue", "red", "yellow"]),
+
+        # Numbers
+        ("David", "42", "David's favorite number is 42.",
+         "What is David's favorite number?", ["7", "99", "13"]),
+        ("Jack", "99", "Jack's lucky number is 99.",
+         "What is Jack's lucky number?", ["7", "42", "13"]),
+        ("Olivia", "7", "Olivia's favorite number is 7.",
+         "What is Olivia's favorite number?", ["42", "99", "13"]),
+    ]
 
     # Filler text (book-like narrative)
     FILLER_SENTENCES = [
@@ -150,14 +156,13 @@ class MemoryProbe:
 
         return " ".join(filler_parts)
 
-    def create_probe(self, target_distance: int) -> tuple[str, str, str]:
+    def create_probe(self, target_distance: int) -> tuple[str, list[str], int, str]:
         """Create a probe with needle at specified token distance.
 
-        Returns: (full_context, question, correct_answer)
+        Returns: (full_context, choices, correct_idx, correct_answer)
         """
-        # Pick a random needle
-        name, answer, needle_sentence = random.choice(self.NEEDLE_FACTS)
-        question = self.QUESTIONS[answer]
+        # Pick a random needle (name, answer, needle_sentence, question, distractors)
+        name, answer, needle_sentence, question, distractors = random.choice(self.NEEDLE_FACTS)
 
         # Calculate filler needed
         needle_tokens = len(self.tokenizer.encode(needle_sentence))
@@ -172,7 +177,12 @@ class MemoryProbe:
         # Construct context: needle -> filler -> question
         context = f"{needle_sentence} {filler}\n\nQuestion: {question}\nAnswer:"
 
-        return context, question, answer
+        # Build choices (correct + 3 distractors), shuffle them
+        all_choices = [answer] + list(distractors)
+        random.shuffle(all_choices)
+        correct_idx = all_choices.index(answer)
+
+        return context, all_choices, correct_idx, answer
 
     def score_answer(self, context: str, answer: str) -> float:
         """Score the log probability of the answer given context."""
@@ -202,22 +212,32 @@ class MemoryProbe:
 
         return float(np.mean(answer_log_probs))
 
+    def score_choices(self, context: str, choices: list[str]) -> int:
+        """Score all choices and return index of highest scoring one."""
+        scores = []
+        for choice in choices:
+            score = self.score_answer(context, choice)
+            scores.append(score)
+        return int(np.argmax(scores))
+
     def run_probe_at_distance(self, distance: int, num_trials: int = 50) -> ProbeResult:
-        """Run probe test at a specific needle distance."""
+        """Run probe test at a specific needle distance using multiple-choice."""
         correct = 0
         log_probs = []
 
         for _ in tqdm(range(num_trials), desc=f"Distance {distance}", leave=False):
-            context, question, correct_answer = self.create_probe(distance)
+            context, choices, correct_idx, correct_answer = self.create_probe(distance)
 
-            # Score the correct answer
-            score = self.score_answer(context, correct_answer)
-            log_probs.append(score)
+            # Multiple-choice scoring: pick the highest scoring choice
+            predicted_idx = self.score_choices(context, choices)
 
-            # For accuracy, we'd need to compare against wrong answers
-            # For now, use log prob threshold
-            if score > -5.0:  # Reasonable threshold
+            # Record accuracy
+            if predicted_idx == correct_idx:
                 correct += 1
+
+            # Also record log prob of correct answer for analysis
+            correct_score = self.score_answer(context, correct_answer)
+            log_probs.append(correct_score)
 
         accuracy = correct / num_trials
         avg_log_prob = float(np.mean(log_probs))
