@@ -36,6 +36,8 @@ parser.add_argument('--output', type=str, default='eval_results.json',
                     help='Output file for results')
 parser.add_argument('--max-examples', type=int, default=500,
                     help='Max examples per benchmark (for speed)')
+parser.add_argument('--benchmark', type=str, default=None,
+                    help='Run only specific benchmark (hellaswag, boolq, piqa, arc_easy, arc_challenge, winogrande)')
 args = parser.parse_args()
 
 # Import Gemma
@@ -217,6 +219,61 @@ class GemmaEvaluator:
         accuracy = correct / total if total > 0 else 0.0
         return BenchmarkResult("arc_easy", accuracy, total, correct)
 
+    def eval_arc_challenge(self, max_examples: int = 500, n_shot: int = 25) -> BenchmarkResult:
+        """Evaluate on ARC-Challenge (harder science questions) with few-shot prompting."""
+        try:
+            from datasets import load_dataset
+            # Load both train (for few-shot examples) and test (for evaluation)
+            train_dataset = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="train")
+            test_dataset = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test")
+        except Exception as e:
+            print(f"Could not load ARC-Challenge: {e}")
+            return BenchmarkResult("arc_challenge", 0.0, 0, 0)
+
+        # Build few-shot prompt from training examples
+        few_shot_examples = []
+        for i, ex in enumerate(train_dataset):
+            if i >= n_shot:
+                break
+            q = ex['question']
+            choices_text = ex['choices']['text']
+            choices_labels = ex['choices']['label']
+            answer_key = ex['answerKey']
+
+            # Format choices as "A. choice1\nB. choice2\n..."
+            choices_str = "\n".join([f"{lbl}. {txt}" for lbl, txt in zip(choices_labels, choices_text)])
+            few_shot_examples.append(f"Question: {q}\n{choices_str}\nAnswer: {answer_key}")
+
+        few_shot_prompt = "\n\n".join(few_shot_examples) + "\n\n"
+        print(f"Using {n_shot}-shot prompt ({len(few_shot_prompt)} chars)")
+
+        correct = 0
+        total = min(len(test_dataset), max_examples)
+
+        for i, example in enumerate(tqdm(test_dataset, total=total, desc=f"ARC-C ({n_shot}-shot)")):
+            if i >= max_examples:
+                break
+
+            # Build prompt with few-shot context
+            q = example['question']
+            choices_text = example['choices']['text']
+            choices_labels = example['choices']['label']
+            choices_str = "\n".join([f"{lbl}. {txt}" for lbl, txt in zip(choices_labels, choices_text)])
+
+            prompt = few_shot_prompt + f"Question: {q}\n{choices_str}\nAnswer:"
+
+            # Score each choice (just the letter)
+            choices = [f" {lbl}" for lbl in choices_labels]
+            label_key = example["answerKey"]
+            label = choices_labels.index(label_key) if label_key in choices_labels else 0
+
+            pred = self.score_choices(prompt, choices)
+            if pred == label:
+                correct += 1
+
+        accuracy = correct / total if total > 0 else 0.0
+        return BenchmarkResult("arc_challenge", accuracy, total, correct)
+
     def eval_winogrande(self, max_examples: int = 500) -> BenchmarkResult:
         """Evaluate on WinoGrande (pronoun resolution)."""
         try:
@@ -252,7 +309,7 @@ class GemmaEvaluator:
         accuracy = correct / total if total > 0 else 0.0
         return BenchmarkResult("winogrande", accuracy, total, correct)
 
-    def run_all_benchmarks(self, max_examples: int = 500) -> dict:
+    def run_all_benchmarks(self, max_examples: int = 500, only_benchmark: str = None) -> dict:
         """Run all benchmarks and return results."""
         results = {}
 
@@ -261,8 +318,16 @@ class GemmaEvaluator:
             ("boolq", self.eval_boolq),
             ("piqa", self.eval_piqa),
             ("arc_easy", self.eval_arc_easy),
+            ("arc_challenge", self.eval_arc_challenge),
             ("winogrande", self.eval_winogrande),
         ]
+
+        # Filter to single benchmark if specified
+        if only_benchmark:
+            benchmarks = [(n, fn) for n, fn in benchmarks if n == only_benchmark]
+            if not benchmarks:
+                print(f"Unknown benchmark: {only_benchmark}")
+                return results
 
         for name, eval_fn in benchmarks:
             print(f"\n=== Evaluating {name} ===")
@@ -307,7 +372,7 @@ def main():
 
     # Run benchmarks
     print(f"\nRunning benchmarks (max {args.max_examples} examples each)...")
-    results = evaluator.run_all_benchmarks(args.max_examples)
+    results = evaluator.run_all_benchmarks(args.max_examples, only_benchmark=args.benchmark)
 
     # Summary
     print("\n" + "=" * 60)
