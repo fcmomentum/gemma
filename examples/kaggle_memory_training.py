@@ -36,6 +36,8 @@ parser.add_argument('--teacher-temp', type=float, default=0.04,
                     help='DINO teacher temperature - lower = sharper (default: 0.04)')
 parser.add_argument('--student-temp', type=float, default=0.1,
                     help='DINO student temperature - higher = softer (default: 0.1)')
+parser.add_argument('--memory-layer', type=int, default=13,
+                    help='Layer to use for memory loss computation (default: 13, middle layer for Gemma 1B)')
 args = parser.parse_args()
 
 # Don't force JAX_PLATFORMS - let it auto-detect TPU/GPU/CPU
@@ -297,18 +299,23 @@ opt_state = optimizer.init(params)
 # Memory loss weight (0 disables memory loss entirely)
 MEMORY_LOSS_WEIGHT = 0.0 if args.no_memory_loss else args.memory_weight
 print(f"Memory loss weight: {MEMORY_LOSS_WEIGHT}" + (" (DISABLED)" if args.no_memory_loss else ""))
+print(f"Memory loss layer: {args.memory_layer} (of 26 total layers)")
 EFFECTIVE_WINDOW = min(WINDOW_SIZE, MAX_LENGTH // 2)  # Adjust for our sequence length
 
 @functools.partial(jax.jit, donate_argnums=(0, 1))
 def train_step_simple(params, opt_state, batch):
     """Training step with simple stop-gradient memory loss."""
 
+    # Get memory layer from args (captured in closure)
+    memory_layer = args.memory_layer
+
     def loss_fn(params):
-        # Forward pass
+        # Forward pass - collect hidden states at the specified layer
         output = model.apply(
             {'params': params},
             batch['input'],
             return_hidden_states=True,
+            collect_layer_hidden_states=(memory_layer,),
         )
 
         # Cross-entropy loss
@@ -318,9 +325,15 @@ def train_step_simple(params, opt_state, batch):
             batch['loss_mask'],
         )
 
-        # Memory reconstruction loss (on hidden states)
+        # Memory reconstruction loss (on layer-specific hidden states)
+        # Use per-layer hidden states if available, else fall back to final
+        if output.hidden_states_per_layer and memory_layer in output.hidden_states_per_layer:
+            hidden_for_memory = output.hidden_states_per_layer[memory_layer]
+        else:
+            hidden_for_memory = output.hidden_states
+
         mem_loss = memory_reconstruction_loss(
-            output.hidden_states,
+            hidden_for_memory,
             window_size=EFFECTIVE_WINDOW,
         )
 
@@ -338,12 +351,16 @@ def train_step_simple(params, opt_state, batch):
 def train_step_dino(params, opt_state, batch):
     """Training step with DINO-style memory loss (single forward pass)."""
 
+    # Get memory layer from args (captured in closure)
+    memory_layer = args.memory_layer
+
     def loss_fn(params):
-        # Single forward pass
+        # Single forward pass - collect hidden states at the specified layer
         output = model.apply(
             {'params': params},
             batch['input'],
             return_hidden_states=True,
+            collect_layer_hidden_states=(memory_layer,),
         )
 
         # Cross-entropy loss
@@ -353,9 +370,16 @@ def train_step_dino(params, opt_state, batch):
             batch['loss_mask'],
         )
 
+        # Memory reconstruction loss (on layer-specific hidden states)
+        # Use per-layer hidden states if available, else fall back to final
+        if output.hidden_states_per_layer and memory_layer in output.hidden_states_per_layer:
+            hidden_for_memory = output.hidden_states_per_layer[memory_layer]
+        else:
+            hidden_for_memory = output.hidden_states
+
         # DINO memory loss (T-W as teacher, T as student, same forward pass)
         mem_loss = dino_memory_loss(
-            output.hidden_states,
+            hidden_for_memory,
             window_size=EFFECTIVE_WINDOW,
             teacher_temp=args.teacher_temp,
             student_temp=args.student_temp,
