@@ -18,8 +18,10 @@ from typing import Iterator
 parser = argparse.ArgumentParser(description='Split-Brain Memory Training for Gemma')
 parser.add_argument('--resume', type=str, default=None,
                     help='Path to checkpoint file to resume from')
+parser.add_argument('--dataset', type=str, default='pg19', choices=['pg19', 'wikitext'],
+                    help='Dataset to use: pg19 or wikitext (default: pg19)')
 parser.add_argument('--max-books', type=int, default=1000,
-                    help='Maximum number of books to load (default: 1000)')
+                    help='Maximum number of books/documents to load (default: 1000)')
 parser.add_argument('--max-examples', type=int, default=100000,
                     help='Maximum training examples (default: 100000)')
 parser.add_argument('--checkpoint-every', type=int, default=500,
@@ -28,6 +30,12 @@ parser.add_argument('--no-memory-loss', action='store_true',
                     help='Disable memory loss (for baseline comparison)')
 parser.add_argument('--memory-weight', type=float, default=0.1,
                     help='Memory loss weight (default: 0.1)')
+parser.add_argument('--memory-type', type=str, default='simple', choices=['simple', 'dino'],
+                    help='Memory loss type: simple (L1 stop-gradient) or dino (cross-entropy) (default: simple)')
+parser.add_argument('--teacher-temp', type=float, default=0.04,
+                    help='DINO teacher temperature - lower = sharper (default: 0.04)')
+parser.add_argument('--student-temp', type=float, default=0.1,
+                    help='DINO student temperature - higher = softer (default: 0.1)')
 args = parser.parse_args()
 
 # Don't force JAX_PLATFORMS - let it auto-detect TPU/GPU/CPU
@@ -101,8 +109,56 @@ def load_pg19_books(split: str = "train", max_books: int = None) -> list[str]:
     print(f"Loaded {len(texts)} books from {split}")
     return texts
 
-# Load a subset for training (full dataset is 28K books, 11GB - too slow to tokenize)
-train_texts = load_pg19_books("train", max_books=args.max_books)
+# === Load WikiText Dataset ===
+def load_wikitext(split: str = "train", max_docs: int = None) -> list[str]:
+    """Load texts from WikiText-103 dataset."""
+    from datasets import load_dataset
+
+    # Map split names
+    hf_split = "train" if split == "train" else "test"
+
+    print(f"Loading WikiText-103 {hf_split} split...")
+    dataset = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", split=hf_split)
+
+    # WikiText has many short paragraphs - combine into longer documents
+    texts = []
+    current_doc = []
+    current_len = 0
+    MIN_DOC_LEN = 2000  # Minimum chars per document
+
+    for item in dataset:
+        text = item["text"].strip()
+        if not text:  # Empty line = document boundary
+            if current_len >= MIN_DOC_LEN:
+                texts.append("\n".join(current_doc))
+                if max_docs and len(texts) >= max_docs:
+                    break
+            current_doc = []
+            current_len = 0
+        else:
+            current_doc.append(text)
+            current_len += len(text)
+
+    # Add final document
+    if current_len >= MIN_DOC_LEN and (not max_docs or len(texts) < max_docs):
+        texts.append("\n".join(current_doc))
+
+    print(f"Loaded {len(texts)} documents from WikiText-103 {hf_split}")
+    return texts
+
+# === Generic Dataset Loader ===
+def load_dataset_texts(dataset: str, split: str, max_docs: int = None) -> list[str]:
+    """Load texts from the specified dataset."""
+    if dataset == "pg19":
+        return load_pg19_books(split, max_docs)
+    elif dataset == "wikitext":
+        return load_wikitext(split, max_docs)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+
+# Load training data
+print(f"\n=== Loading {args.dataset} dataset ===")
+train_texts = load_dataset_texts(args.dataset, "train", args.max_books)
 print(f"Total characters: {sum(len(t) for t in train_texts):,}")
 
 # === Tokenizer and Data Processing ===
@@ -164,6 +220,9 @@ else:
     )
     print("Loaded pretrained Gemma3 1B PT")
 
+# NOTE: DINO mode now uses single-pass with T-W as teacher, T as student
+# No EMA params needed - saves memory!
+
 # === Define Loss Functions ===
 def cross_entropy_loss(logits, targets, mask):
     """Standard next-token prediction loss."""
@@ -174,7 +233,7 @@ def cross_entropy_loss(logits, targets, mask):
     return jnp.sum(loss * mask) / jnp.sum(mask)
 
 def memory_reconstruction_loss(hidden_states, window_size: int = 512):
-    """L1 loss for memory head training.
+    """L1 loss for memory head training (simple stop-gradient version).
 
     Trains model to predict state of token T-W from current state T.
     """
@@ -193,6 +252,44 @@ def memory_reconstruction_loss(hidden_states, window_size: int = 512):
     # L1 loss
     return jnp.mean(jnp.abs(current - target))
 
+def dino_memory_loss(hidden_states, window_size: int = 512,
+                     teacher_temp: float = 0.04, student_temp: float = 0.1):
+    """DINO-style memory loss with single forward pass.
+
+    Teacher: hidden state at position T-W (with stop_gradient, low temp softmax)
+    Student: hidden state at position T (higher temp softmax)
+    Loss: Cross-entropy between teacher and student distributions
+
+    This encourages the model to predict what information was present W tokens
+    ago using DINO's self-distillation formulation.
+    """
+    if hidden_states is None:
+        return jnp.array(0.0)
+
+    seq_len = hidden_states.shape[1]
+    if seq_len <= window_size:
+        return jnp.array(0.0)
+
+    # Student: current position (time T)
+    student = hidden_states[:, window_size:, :]
+    # Teacher: past position (time T-W) - stop gradient!
+    teacher = jax.lax.stop_gradient(hidden_states[:, :-window_size, :])
+
+    # Compute similarity scores along hidden dimension
+    # Treat each hidden position as a "class" - softmax over hidden dim
+    # Teacher: sharp distribution (low temperature)
+    teacher_logits = teacher / teacher_temp
+    teacher_probs = jax.nn.softmax(teacher_logits, axis=-1)
+
+    # Student: softer distribution (higher temperature)
+    student_logits = student / student_temp
+    student_log_probs = jax.nn.log_softmax(student_logits, axis=-1)
+
+    # Cross-entropy: H(teacher, student) = -sum(teacher * log(student))
+    loss = -jnp.sum(teacher_probs * student_log_probs, axis=-1)
+
+    return jnp.mean(loss)
+
 # === Training Setup ===
 optimizer = optax.adafactor(learning_rate=1e-4)
 opt_state = optimizer.init(params)
@@ -203,8 +300,8 @@ print(f"Memory loss weight: {MEMORY_LOSS_WEIGHT}" + (" (DISABLED)" if args.no_me
 EFFECTIVE_WINDOW = min(WINDOW_SIZE, MAX_LENGTH // 2)  # Adjust for our sequence length
 
 @functools.partial(jax.jit, donate_argnums=(0, 1))
-def train_step(params, opt_state, batch):
-    """Single training step with cross-entropy + memory loss."""
+def train_step_simple(params, opt_state, batch):
+    """Training step with simple stop-gradient memory loss."""
 
     def loss_fn(params):
         # Forward pass
@@ -236,6 +333,47 @@ def train_step(params, opt_state, batch):
     params = optax.apply_updates(params, updates)
 
     return params, opt_state, {"loss": loss, "xent": xent, "mem_loss": mem_loss}
+
+@functools.partial(jax.jit, donate_argnums=(0, 1))
+def train_step_dino(params, opt_state, batch):
+    """Training step with DINO-style memory loss (single forward pass)."""
+
+    def loss_fn(params):
+        # Single forward pass
+        output = model.apply(
+            {'params': params},
+            batch['input'],
+            return_hidden_states=True,
+        )
+
+        # Cross-entropy loss
+        xent = cross_entropy_loss(
+            output.logits,
+            batch['target'],
+            batch['loss_mask'],
+        )
+
+        # DINO memory loss (T-W as teacher, T as student, same forward pass)
+        mem_loss = dino_memory_loss(
+            output.hidden_states,
+            window_size=EFFECTIVE_WINDOW,
+            teacher_temp=args.teacher_temp,
+            student_temp=args.student_temp,
+        )
+
+        total_loss = xent + MEMORY_LOSS_WEIGHT * mem_loss
+        return total_loss, (xent, mem_loss)
+
+    (loss, (xent, mem_loss)), grads = jax.value_and_grad(loss_fn, has_aux=True)(params)
+
+    updates, opt_state = optimizer.update(grads, opt_state, params)
+    params = optax.apply_updates(params, updates)
+
+    return params, opt_state, {"loss": loss, "xent": xent, "mem_loss": mem_loss}
+
+# Select train step based on memory type
+USE_DINO = (args.memory_type == 'dino' and not args.no_memory_loss)
+print(f"Memory type: {args.memory_type}" + (" (DINO single-pass)" if USE_DINO else ""))
 
 def batch_examples(examples: list, batch_size: int) -> Iterator[dict]:
     """Batch examples together."""
@@ -284,7 +422,7 @@ def save_checkpoint(params, step):
 
 # === Pre-load Test Set for Periodic Evaluation ===
 print("Loading test set for evaluation...")
-test_texts = load_pg19_books("test", max_books=50)
+test_texts = load_dataset_texts(args.dataset, "test", 50)
 test_examples = list(create_training_examples(test_texts, MAX_LENGTH, max_examples=500))
 print(f"Test set: {len(test_examples)} examples")
 
@@ -347,7 +485,11 @@ for epoch in range(NUM_EPOCHS):
         # Convert to JAX arrays
         batch = {k: jnp.array(v) for k, v in batch.items()}
 
-        params, opt_state, metrics = train_step(params, opt_state, batch)
+        # Use appropriate train step based on memory type
+        if USE_DINO:
+            params, opt_state, metrics = train_step_dino(params, opt_state, batch)
+        else:
+            params, opt_state, metrics = train_step_simple(params, opt_state, batch)
 
         if step % LOG_EVERY == 0:
             # Convert JAX arrays to Python floats
