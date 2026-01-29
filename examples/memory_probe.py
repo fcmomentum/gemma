@@ -324,98 +324,30 @@ class MemoryProbe:
         return int(np.argmax(scores)), scores
 
     def score_choices(self, context: str, choices: list[str]) -> int:
-        """Score all choices and return index of highest scoring one."""
-        best_idx, _ = self.score_choices_batched(context, choices)
-        return best_idx
+        """Score all choices sequentially and return index of highest scoring one."""
+        scores = []
+        for choice in choices:
+            score = self.score_answer(context, choice)
+            scores.append(score)
+        return int(np.argmax(scores)), scores
 
     def run_probe_at_distance(self, distance: int, num_trials: int = 50) -> ProbeResult:
-        """Run probe test at a specific needle distance using multiple-choice.
-
-        Uses multi-GPU parallelism by batching multiple trials together.
-        """
-        # Pre-generate all probes first
-        probes = []
-        for _ in range(num_trials):
-            context, choices, correct_idx, correct_answer = self.create_probe(distance)
-            probes.append((context, choices, correct_idx))
-
-        # Determine batch size based on devices
-        # Each trial has 4 choices, we want to run N trials per batch
-        # where N * 4 >= n_devices for good GPU utilization
-        trials_per_batch = max(self.n_devices, 4)  # At least 4 trials per batch
-
+        """Run probe test at a specific needle distance using multiple-choice."""
         correct = 0
         log_probs = []
 
-        # Process in batches
-        for batch_start in tqdm(range(0, num_trials, trials_per_batch),
-                                desc=f"Distance {distance}", leave=False):
-            batch_end = min(batch_start + trials_per_batch, num_trials)
-            batch_probes = probes[batch_start:batch_end]
+        for _ in tqdm(range(num_trials), desc=f"Distance {distance}", leave=False):
+            context, choices, correct_idx, correct_answer = self.create_probe(distance)
 
-            # Collect all sequences for this batch (trials * 4 choices each)
-            all_sequences = []
-            all_answer_info = []  # (answer_tokens, context_len, trial_idx, choice_idx)
+            # Simple sequential scoring - reliable, no batching issues
+            predicted_idx, scores = self.score_choices(context, choices)
 
-            for trial_idx, (context, choices, correct_idx) in enumerate(batch_probes):
-                context_tokens = self.tokenizer.encode(context)
-                for choice_idx, choice in enumerate(choices):
-                    answer_tokens = self.tokenizer.encode(" " + choice)
-                    full_tokens = context_tokens + answer_tokens
-                    all_sequences.append(full_tokens[:-1])
-                    all_answer_info.append((answer_tokens, len(context_tokens), trial_idx, choice_idx))
+            # Record accuracy
+            if predicted_idx == correct_idx:
+                correct += 1
 
-            # Pad all sequences to same length
-            max_len = max(len(s) for s in all_sequences)
-            padded = [s + [0] * (max_len - len(s)) for s in all_sequences]
-
-            # Use pmap only if explicitly enabled AND available
-            if self.use_pmap and self._get_logits_parallel_fn is not None and len(padded) >= self.n_devices:
-                # Pad batch to be divisible by n_devices
-                while len(padded) % self.n_devices != 0:
-                    padded.append(padded[0])
-                    all_answer_info.append(all_answer_info[0])  # Dummy, won't be used
-
-                batch_per_device = len(padded) // self.n_devices
-                stacked = jnp.array(padded).reshape(self.n_devices, batch_per_device, max_len)
-
-                # Run parallel inference across GPUs!
-                logits = self._get_logits_parallel_fn(self.replicated_params, stacked)
-                logits = logits.reshape(-1, logits.shape[-2], logits.shape[-1])
-            else:
-                # Single GPU batched - reliable and fast
-                batch_input = jnp.array(padded)
-                logits = self._get_logits_fn(self.params, batch_input)
-
-            # Calculate scores for each choice
-            trial_scores = {}  # trial_idx -> [score0, score1, score2, score3]
-
-            for i, (answer_tokens, context_len, trial_idx, choice_idx) in enumerate(all_answer_info):
-                if trial_idx >= len(batch_probes):  # Skip padding
-                    continue
-
-                log_probs_seq = jax.nn.log_softmax(logits[i], axis=-1)
-
-                answer_log_probs_list = []
-                for j, token in enumerate(answer_tokens):
-                    pos = context_len - 1 + j
-                    if pos < log_probs_seq.shape[0]:
-                        answer_log_probs_list.append(float(log_probs_seq[pos, token]))
-
-                score = float(np.mean(answer_log_probs_list)) if answer_log_probs_list else float('-inf')
-
-                if trial_idx not in trial_scores:
-                    trial_scores[trial_idx] = [None] * 4
-                trial_scores[trial_idx][choice_idx] = score
-
-            # Evaluate each trial in this batch
-            for trial_idx, (context, choices, correct_idx) in enumerate(batch_probes):
-                scores = trial_scores[trial_idx]
-                predicted_idx = int(np.argmax(scores))
-
-                if predicted_idx == correct_idx:
-                    correct += 1
-                log_probs.append(scores[correct_idx])
+            # Record log prob of correct answer
+            log_probs.append(scores[correct_idx])
 
         accuracy = correct / num_trials
         avg_log_prob = float(np.mean(log_probs))
