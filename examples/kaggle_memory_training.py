@@ -36,8 +36,8 @@ parser.add_argument('--teacher-temp', type=float, default=0.04,
                     help='DINO teacher temperature - lower = sharper (default: 0.04)')
 parser.add_argument('--student-temp', type=float, default=0.1,
                     help='DINO student temperature - higher = softer (default: 0.1)')
-parser.add_argument('--memory-layer', type=int, default=13,
-                    help='Layer to use for memory loss computation (default: 13, middle layer for Gemma 1B)')
+parser.add_argument('--memory-layer', type=int, default=9,
+                    help='Layer to use for memory loss computation (default: 9, middle layer for Gemma 270M)')
 args = parser.parse_args()
 
 # Don't force JAX_PLATFORMS - let it auto-detect TPU/GPU/CPU
@@ -69,7 +69,7 @@ wandb.init(
     project="gemma-memory",
     name="pg19-splitbrain",
     config={
-        "model": "Gemma3_1B",
+        "model": "Gemma3_270M",
         "max_length": 1024,
         "batch_size": 8,
         "memory_loss_weight": 0.1,
@@ -200,7 +200,7 @@ examples = list(create_training_examples(train_texts, MAX_LENGTH, args.max_examp
 print(f"Created {len(examples):,} training examples")
 
 # === Load Model and Handle Resume ===
-model = gm.nn.Gemma3_1B(tokens="input")
+model = gm.nn.Gemma3_270M(tokens="input")
 
 # Check for resume from checkpoint
 start_step = 0
@@ -218,9 +218,9 @@ else:
     # Load pretrained weights for training
     # Using PT (pretrained) model for language modeling, not IT (instruction-tuned)
     params = gm.ckpts.load_params(
-        path=gm.ckpts.CheckpointPath.GEMMA3_1B_PT,
+        path=gm.ckpts.CheckpointPath.GEMMA3_270M_PT,
     )
-    print("Loaded pretrained Gemma3 1B PT")
+    print("Loaded pretrained Gemma3 270M PT")
 
 # NOTE: DINO mode now uses single-pass with T-W as teacher, T as student
 # No EMA params needed - saves memory!
@@ -299,7 +299,7 @@ opt_state = optimizer.init(params)
 # Memory loss weight (0 disables memory loss entirely)
 MEMORY_LOSS_WEIGHT = 0.0 if args.no_memory_loss else args.memory_weight
 print(f"Memory loss weight: {MEMORY_LOSS_WEIGHT}" + (" (DISABLED)" if args.no_memory_loss else ""))
-print(f"Memory loss layer: {args.memory_layer} (of 26 total layers)")
+print(f"Memory loss layer: {args.memory_layer} (Gemma 270M has 18 layers)")
 EFFECTIVE_WINDOW = min(WINDOW_SIZE, MAX_LENGTH // 2)  # Adjust for our sequence length
 
 @functools.partial(jax.jit, donate_argnums=(0, 1))

@@ -380,7 +380,7 @@ def main():
     print("=" * 60)
 
     # Load model
-    model = gm.nn.Gemma3_1B(tokens="input")
+    model = gm.nn.Gemma3_270M(tokens="input")
     tokenizer = gm.text.Gemma3Tokenizer()
 
     if args.checkpoint:
@@ -388,8 +388,8 @@ def main():
         with open(args.checkpoint, "rb") as f:
             params = pickle.load(f)
     else:
-        print("\nLoading baseline Gemma3 1B PT...")
-        params = gm.ckpts.load_params(path=gm.ckpts.CheckpointPath.GEMMA3_1B_PT)
+        print("\nLoading baseline Gemma3 270M PT...")
+        params = gm.ckpts.load_params(path=gm.ckpts.CheckpointPath.GEMMA3_270M_PT)
 
     # Create probe (single-gpu mode by default for reliability)
     use_pmap = not args.single_gpu and len(jax.devices()) > 1
