@@ -274,13 +274,54 @@ class MemoryProbe:
 
         return float(np.mean(answer_log_probs))
 
+    def score_choices_batched(self, context: str, choices: list[str]) -> tuple[int, list[float]]:
+        """Score all choices in a batched manner, return (best_idx, scores).
+
+        This uses a single batched forward pass when possible.
+        """
+        # Tokenize context once
+        context_tokens = self.tokenizer.encode(context)
+
+        # Build all sequences
+        sequences = []
+        answer_token_info = []  # Store (answer_tokens, context_len) for each choice
+
+        for choice in choices:
+            answer_tokens = self.tokenizer.encode(" " + choice)
+            full_tokens = context_tokens + answer_tokens
+            sequences.append(full_tokens[:-1])  # Input tokens
+            answer_token_info.append((answer_tokens, len(context_tokens)))
+
+        # Batch inference - pad to same length
+        max_len = max(len(s) for s in sequences)
+        padded = [s + [0] * (max_len - len(s)) for s in sequences]
+        batch_input = jnp.array(padded)
+
+        # Single forward pass for all choices!
+        logits = self.get_logits(batch_input)
+
+        # Calculate scores for each choice
+        scores = []
+        for i, (answer_tokens, context_len) in enumerate(answer_token_info):
+            log_probs = jax.nn.log_softmax(logits[i], axis=-1)
+
+            answer_log_probs = []
+            for j, token in enumerate(answer_tokens):
+                pos = context_len - 1 + j
+                if pos < log_probs.shape[0]:
+                    answer_log_probs.append(float(log_probs[pos, token]))
+
+            if answer_log_probs:
+                scores.append(float(np.mean(answer_log_probs)))
+            else:
+                scores.append(float('-inf'))
+
+        return int(np.argmax(scores)), scores
+
     def score_choices(self, context: str, choices: list[str]) -> int:
         """Score all choices and return index of highest scoring one."""
-        scores = []
-        for choice in choices:
-            score = self.score_answer(context, choice)
-            scores.append(score)
-        return int(np.argmax(scores))
+        best_idx, _ = self.score_choices_batched(context, choices)
+        return best_idx
 
     def run_probe_at_distance(self, distance: int, num_trials: int = 50) -> ProbeResult:
         """Run probe test at a specific needle distance using multiple-choice."""
@@ -290,16 +331,15 @@ class MemoryProbe:
         for _ in tqdm(range(num_trials), desc=f"Distance {distance}", leave=False):
             context, choices, correct_idx, correct_answer = self.create_probe(distance)
 
-            # Multiple-choice scoring: pick the highest scoring choice
-            predicted_idx = self.score_choices(context, choices)
+            # Multiple-choice scoring with batched forward pass
+            predicted_idx, scores = self.score_choices_batched(context, choices)
 
             # Record accuracy
             if predicted_idx == correct_idx:
                 correct += 1
 
-            # Also record log prob of correct answer for analysis
-            correct_score = self.score_answer(context, correct_answer)
-            log_probs.append(correct_score)
+            # Record log prob of correct answer from batched scores
+            log_probs.append(scores[correct_idx])
 
         accuracy = correct / num_trials
         avg_log_prob = float(np.mean(log_probs))
