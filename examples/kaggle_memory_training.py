@@ -306,16 +306,12 @@ EFFECTIVE_WINDOW = min(WINDOW_SIZE, MAX_LENGTH // 2)  # Adjust for our sequence 
 def train_step_simple(params, opt_state, batch):
     """Training step with simple stop-gradient memory loss."""
 
-    # Get memory layer from args (captured in closure)
-    memory_layer = args.memory_layer
-
     def loss_fn(params):
-        # Forward pass - collect hidden states at the specified layer
+        # Forward pass
         output = model.apply(
             {'params': params},
             batch['input'],
             return_hidden_states=True,
-            collect_layer_hidden_states=(memory_layer,),
         )
 
         # Cross-entropy loss
@@ -325,15 +321,9 @@ def train_step_simple(params, opt_state, batch):
             batch['loss_mask'],
         )
 
-        # Memory reconstruction loss (on layer-specific hidden states)
-        # Use per-layer hidden states if available, else fall back to final
-        if output.hidden_states_per_layer and memory_layer in output.hidden_states_per_layer:
-            hidden_for_memory = output.hidden_states_per_layer[memory_layer]
-        else:
-            hidden_for_memory = output.hidden_states
-
+        # Memory reconstruction loss (on hidden states)
         mem_loss = memory_reconstruction_loss(
-            hidden_for_memory,
+            output.hidden_states,
             window_size=EFFECTIVE_WINDOW,
         )
 
@@ -351,16 +341,12 @@ def train_step_simple(params, opt_state, batch):
 def train_step_dino(params, opt_state, batch):
     """Training step with DINO-style memory loss (single forward pass)."""
 
-    # Get memory layer from args (captured in closure)
-    memory_layer = args.memory_layer
-
     def loss_fn(params):
-        # Single forward pass - collect hidden states at the specified layer
+        # Single forward pass
         output = model.apply(
             {'params': params},
             batch['input'],
             return_hidden_states=True,
-            collect_layer_hidden_states=(memory_layer,),
         )
 
         # Cross-entropy loss
@@ -370,16 +356,9 @@ def train_step_dino(params, opt_state, batch):
             batch['loss_mask'],
         )
 
-        # Memory reconstruction loss (on layer-specific hidden states)
-        # Use per-layer hidden states if available, else fall back to final
-        if output.hidden_states_per_layer and memory_layer in output.hidden_states_per_layer:
-            hidden_for_memory = output.hidden_states_per_layer[memory_layer]
-        else:
-            hidden_for_memory = output.hidden_states
-
         # DINO memory loss (T-W as teacher, T as student, same forward pass)
         mem_loss = dino_memory_loss(
-            hidden_for_memory,
+            output.hidden_states,
             window_size=EFFECTIVE_WINDOW,
             teacher_temp=args.teacher_temp,
             student_temp=args.student_temp,
@@ -485,8 +464,7 @@ def quick_evaluate(params):
 
 # === Evaluate Baseline Before Training ===
 # At step 0, params == baseline (pretrained model)
-# TEMPORARILY DISABLED - baseline eval was hanging
-if False and start_step == 0:
+if start_step == 0:
     print("\n--- Baseline Evaluation (Before Training) ---")
     baseline_metrics_initial = quick_evaluate(params)
     wandb.log({
@@ -496,10 +474,9 @@ if False and start_step == 0:
     })
     print(f"Baseline perplexity: {baseline_metrics_initial['perplexity']:.2f}")
 else:
-    print("\n(Skipping baseline eval for faster startup)")
+    print("\n(Skipping baseline eval - resuming from checkpoint)")
 
 print(f"\nStarting training from step {start_step}...")
-print("NOTE: First step will take 2-5 minutes for JIT compilation...")
 step = start_step
 
 for epoch in range(NUM_EPOCHS):

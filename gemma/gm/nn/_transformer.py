@@ -58,15 +58,13 @@ class Output:
   Attributes:
     logits: Predicted logits of the model.
     cache: Updated cache if the input cache is not None, None elsewhere.
-    hidden_states: The hidden states of the model (final layer).
-    hidden_states_per_layer: Hidden states at specific layers (dict: layer_idx -> states).
+    hidden_states: The hidden states of the model.
   """
 
   # When `return_last_only`, `logits` is `*B V`
   logits: Float['*B L V'] | Float['*B V']
   cache: _config.Cache | None
   hidden_states: Float['*B L D'] | Float['*B D'] | None
-  hidden_states_per_layer: dict[int, Float['*B L D']] | None = None
 
 
 @flax.struct.dataclass
@@ -177,7 +175,6 @@ class Transformer(nn.Module):
           'self',
           'return_last_only',
           'return_hidden_states',
-          'collect_layer_hidden_states',
       ),
   )
   # The function accepts/returns aribtrary batch shape, but inside the
@@ -200,7 +197,6 @@ class Transformer(nn.Module):
       attention_mask: Bool['*B L_with_mm cache_length'] | None = None,
       return_last_only: bool | None = None,
       return_hidden_states: bool | None = None,
-      collect_layer_hidden_states: tuple[int, ...] | None = None,
   ) -> Output:  # Output['*B']
     """Transformer forward pass.
 
@@ -250,9 +246,7 @@ class Transformer(nn.Module):
       )
       del positions, attention_mask
 
-      # Convert tuple to list for _apply_attention
-      layer_indices = list(collect_layer_hidden_states) if collect_layer_hidden_states else None
-      x, new_cache, layer_hidden_states = self._apply_attention(inputs, cache, layer_indices)
+      x, new_cache = self._apply_attention(inputs, cache)
 
     if return_last_only:
       last_input_token_idx = jnp.sum(inputs.inputs_mask, axis=-1) - 1
@@ -278,28 +272,23 @@ class Transformer(nn.Module):
         logits=logits,
         cache=None if cache is None else new_cache,
         hidden_states=x if return_hidden_states else None,
-        hidden_states_per_layer=layer_hidden_states,
     )
 
   def _apply_attention(
-      self, inputs: _Inputs, cache: _config.Cache | None,
-      collect_layer_indices: list[int] | None = None,
-  ) -> tuple[Float['*B L D'], _config.Cache, dict[int, Float['*B L D']] | None]:
+      self, inputs: _Inputs, cache: _config.Cache | None
+  ) -> tuple[Float['*B L D'], _config.Cache]:
     """Runs the transformer blocks.
 
     Args:
       inputs: Input containing embeddings, attention mask, and positions.
       cache: Attention KV cache or None.
-      collect_layer_indices: Optional list of layer indices to collect hidden states from.
 
     Returns:
-      Tuple of (final_hidden_states, new_cache, per_layer_hidden_states).
+      Transformer(inputs.embeddings).
     """
     x = inputs.embeddings
     old_cache = cache or {}
     new_cache = {}
-    layer_hidden_states = {} if collect_layer_indices else None
-
     for i, block in enumerate(self.blocks):
       layer_name = f'layer_{i}'
       layer_cache, x = block(
@@ -310,12 +299,8 @@ class Transformer(nn.Module):
       )
       new_cache[layer_name] = layer_cache  # pytype: disable=container-type-mismatch
 
-      # Collect hidden states at specified layers (before final_norm)
-      if collect_layer_indices is not None and i in collect_layer_indices:
-        layer_hidden_states[i] = x
-
     x = self.final_norm(x)
-    return x, new_cache, layer_hidden_states
+    return x, new_cache
 
   @functools.partial(
       nn.jit,
