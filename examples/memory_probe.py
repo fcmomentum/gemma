@@ -131,7 +131,12 @@ class MemoryProbe:
         self.model = model
         self.tokenizer = tokenizer
 
-        # JIT compile forward pass
+        # Detect available devices
+        self.devices = jax.devices()
+        self.n_devices = len(self.devices)
+        print(f"Using {self.n_devices} device(s): {[d.platform for d in self.devices]}")
+
+        # JIT compile forward pass (single device)
         @jax.jit
         def _get_logits(params, input_ids):
             output = model.apply({'params': params}, input_ids)
@@ -139,9 +144,66 @@ class MemoryProbe:
 
         self._get_logits_fn = _get_logits
 
+        # For multi-GPU: pmap version (data parallelism)
+        if self.n_devices > 1:
+            # Replicate params across devices
+            self.replicated_params = jax.device_put_replicated(params, self.devices)
+
+            @jax.pmap
+            def _get_logits_parallel(params, input_ids):
+                output = model.apply({'params': params}, input_ids)
+                return output.logits
+
+            self._get_logits_parallel_fn = _get_logits_parallel
+            print(f"Multi-GPU mode enabled with pmap")
+        else:
+            self.replicated_params = None
+            self._get_logits_parallel_fn = None
+
     def get_logits(self, input_ids):
         """Get model logits for input."""
         return self._get_logits_fn(self.params, input_ids)
+
+    def get_logits_batch(self, batch_input_ids):
+        """Get logits for a batch, using multi-GPU if available.
+
+        Args:
+            batch_input_ids: list of token ID lists (one per sample)
+        Returns:
+            list of logits arrays
+        """
+        if self.n_devices > 1 and len(batch_input_ids) >= self.n_devices:
+            # Pad batch to be divisible by n_devices
+            padded_size = ((len(batch_input_ids) + self.n_devices - 1) // self.n_devices) * self.n_devices
+            while len(batch_input_ids) < padded_size:
+                batch_input_ids.append(batch_input_ids[0])  # Pad with first example
+
+            # Reshape for pmap: (n_devices, batch_per_device, seq_len)
+            batch_per_device = len(batch_input_ids) // self.n_devices
+            max_len = max(len(x) for x in batch_input_ids)
+
+            # Pad sequences to same length
+            padded_batch = []
+            for ids in batch_input_ids:
+                padded = ids + [0] * (max_len - len(ids))
+                padded_batch.append(padded)
+
+            # Reshape
+            stacked = jnp.array(padded_batch).reshape(self.n_devices, batch_per_device, max_len)
+
+            # Run parallel inference
+            logits = self._get_logits_parallel_fn(self.replicated_params, stacked)
+
+            # Flatten back
+            return logits.reshape(-1, logits.shape[-2], logits.shape[-1])
+        else:
+            # Single GPU fallback
+            results = []
+            for ids in batch_input_ids:
+                input_ids = jnp.array([ids])
+                logits = self._get_logits_fn(self.params, input_ids)
+                results.append(logits[0])
+            return results
 
     def generate_filler(self, num_tokens: int) -> str:
         """Generate filler text of approximately num_tokens."""
