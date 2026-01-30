@@ -277,7 +277,7 @@ def eval_step(
   return {
       'val_ce_loss': ce_loss,
       'val_ppl': ppl,
-      'val_aux_loss': output.aux_loss,
+      'val_aux_loss': jnp.mean(output.aux_loss),
   }
 
 
@@ -325,7 +325,7 @@ def main():
   parser.add_argument('--learning_rate', type=float, default=1e-4)
   parser.add_argument('--prophet_weight', type=float, default=0.1,
                       help='Weight λ for auxiliary Prophet loss')
-  parser.add_argument('--mask_ratio', type=float, default=0.15,
+  parser.add_argument('--mask_ratio', type=float, default=0.5,
                       help='Random masking ratio for Student stream')
   parser.add_argument('--output_dir', type=str, default='/tmp/split_brain')
   parser.add_argument('--log_every', type=int, default=100)

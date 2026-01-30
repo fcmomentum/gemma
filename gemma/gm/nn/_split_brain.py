@@ -34,7 +34,7 @@ import jax.numpy as jnp
 class SplitBrainConfig:
   """Configuration for Split-Brain Prophet mechanism."""
 
-  mask_ratio: float = 0.15  # Probability of masking tokens in Student stream
+  mask_ratio: float = 0.5  # Probability of masking tokens in Student stream
   prophet_weight: float = 0.1  # λ weight for auxiliary loss
   target_shift: int = 1  # Student(t) predicts Teacher(t+1)
   stop_gradient: bool = True  # Detach Teacher target from gradient
@@ -196,16 +196,34 @@ class SplitBrainAttention(nn.Module):
     Returns:
       Student mask with additional random masking [B, L, cache_len].
     """
-    # Generate random mask with Bernoulli distribution
-    # Shape matches attention mask for broadcasting
-    random_mask = jax.random.bernoulli(
+    # Create column-wise mask (dropping specific tokens for ALL queries)
+    # Shape: [B, 1, cache_len] or [B, 1, L]
+    B, L, K = attn_mask.shape
+
+    # Generate random mask for keys (1 = keep, 0 = drop)
+    key_keep_mask = jax.random.bernoulli(
         self.make_rng('dropout'),
-        p=1.0 - self.mask_ratio,  # p = probability of KEEPING the token
-        shape=attn_mask.shape,
+        p=1.0 - self.mask_ratio,
+        shape=(B, 1, K),
     )
 
-    # Combine with base causal mask
-    # Both conditions must be True to allow attention
+    # Always keep the current token (diagonal) visible to itself
+    # to avoid complete collapse if all history is masked
+    # Create diagonal mask [1, L, K]
+    eye = jnp.eye(L, K, k=0, dtype=jnp.bool_)
+    eye = jnp.expand_dims(eye, axis=0) # [1, L, K]
+
+    # Broadcast key mask to [B, L, K]
+    random_mask = jnp.broadcast_to(key_keep_mask, (B, L, K))
+
+    # Ensure diagonal is always true (OR logic)
+    # If a token is dropped, it's dropped from history, but t attends to t
+    random_mask = random_mask | eye
+
+    # Combine with causal mask (AND logic)
+    # student_mask[b, i, j] is True if:
+    # 1. causal_mask[b, i, j] is True (j <= i)
+    # 2. AND (token j is kept OR i == j)
     student_mask = attn_mask & random_mask
 
     return student_mask
