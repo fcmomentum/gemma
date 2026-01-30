@@ -452,9 +452,9 @@ def main():
         samples_per_sec = (step * args.batch_size) / elapsed
         print(
             f'Step {step}/{args.num_train_steps} | '
-            f'CE: {metrics["ce_loss"]:.4f} | '
-            f'Aux: {metrics["aux_loss"]:.4f} | '
-            f'Total: {metrics["total_loss"]:.4f} | '
+            f'CE: {float(metrics["ce_loss"]):.4f} | '
+            f'Aux: {float(metrics["aux_loss"]):.4f} | '
+            f'Total: {float(metrics["total_loss"]):.4f} | '
             f'{samples_per_sec:.1f} samples/sec'
         )
         # Log to W&B
@@ -482,9 +482,9 @@ def main():
             num_val_batches=args.num_val_batches,
         )
         print(
-            f'Val CE: {val_metrics["val_ce_loss"]:.4f} | '
-            f'Val PPL: {val_metrics["val_ppl"]:.2f} | '
-            f'Val Aux: {val_metrics["val_aux_loss"]:.4f}'
+            f'Val CE: {float(val_metrics["val_ce_loss"]):.4f} | '
+            f'Val PPL: {float(val_metrics["val_ppl"]):.2f} | '
+            f'Val Aux: {float(val_metrics["val_aux_loss"]):.4f}'
         )
         print('=' * 40 + '\n')
         # Log validation to W&B
@@ -499,8 +499,8 @@ def main():
         break
 
   print(f'Training complete! Final step: {step}')
-  print(f'Final CE loss: {metrics["ce_loss"]:.4f}')
-  print(f'Final Aux loss: {metrics["aux_loss"]:.4f}')
+  print(f'Final CE loss: {float(metrics["ce_loss"]):.4f}')
+  print(f'Final Aux loss: {float(metrics["aux_loss"]):.4f}')
 
   # Finish W&B run
   if args.wandb_project:
