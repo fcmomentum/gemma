@@ -60,6 +60,14 @@ with _epy.lazy_api_imports(globals()):
   from gemma.gm.nn._modules import FeedForward
   from gemma.gm.nn._modules import AttentionType
 
+  # Split-Brain Prophet components
+  from gemma.gm.nn._split_brain import GatedFusion
+  from gemma.gm.nn._split_brain import SplitBrainAttention
+  from gemma.gm.nn._split_brain import SplitBrainBlock
+  from gemma.gm.nn._split_brain import SplitBrainConfig
+  from gemma.gm.nn._split_brain_transformer import SplitBrainTransformer
+  from gemma.gm.nn._split_brain_transformer import SplitBrainOutput
+
   # Model inputs
   from gemma.gm.nn._config import Cache
 

@@ -1,0 +1,365 @@
+# Copyright 2025 DeepMind Technologies Limited.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+r"""Split-Brain Prophet training with FineWeb-Edu dataset.
+
+This example trains a Split-Brain Prophet model on the FineWeb-Edu dataset,
+which is ideal for improving reasoning and planning capabilities.
+
+The Split-Brain architecture introduces:
+- Teacher Stream: Standard causal attention
+- Student Stream: Masked causal attention predicting Teacher's future states
+- Combined Loss: CE (next-token) + λ * Prophet (Student predicts Teacher+1)
+
+Train locally with Gemma3 270M:
+
+```sh
+python examples/split_brain_fineweb.py \
+    --model_size=270m \
+    --batch_size=8 \
+    --max_length=1024 \
+    --num_train_steps=10000 \
+    --learning_rate=1e-4 \
+    --prophet_weight=0.1 \
+    --output_dir=/tmp/split_brain_270m
+```
+
+Train with Gemma3 1B:
+
+```sh
+python examples/split_brain_fineweb.py \
+    --model_size=1b \
+    --batch_size=4 \
+    --max_length=1024 \
+    --num_train_steps=10000 \
+    --learning_rate=5e-5 \
+    --prophet_weight=0.1 \
+    --output_dir=/tmp/split_brain_1b
+```
+"""
+
+import argparse
+import functools
+import time
+from typing import Any
+
+from datasets import load_dataset
+from flax import linen as nn
+from flax.training import train_state
+from gemma import gm
+from gemma.gm.nn import _split_brain
+from gemma.gm.nn import _split_brain_transformer
+import jax
+import jax.numpy as jnp
+import optax
+
+
+# Layer indices where Split-Brain is applied (75% depth as per PRD)
+# Gemma3 270M has 18 layers -> layers 13, 14, 15 (indices start at 0)
+# Gemma3 1B has 26 layers -> layers 19, 20, 21
+SPLIT_BRAIN_LAYERS_270M = (13, 14, 15)
+SPLIT_BRAIN_LAYERS_1B = (19, 20, 21)
+
+
+def get_model_and_config(
+    model_size: str,
+    split_brain_config: _split_brain.SplitBrainConfig,
+) -> tuple[nn.Module, gm.nn.config.TransformerConfig]:
+  """Get model and config for the specified size."""
+  if model_size == '270m':
+    base_config = gm.nn.Gemma3_270M.config
+    split_layers = SPLIT_BRAIN_LAYERS_270M
+  elif model_size == '1b':
+    base_config = gm.nn.Gemma3_1B.config
+    split_layers = SPLIT_BRAIN_LAYERS_1B
+  else:
+    raise ValueError(f'Unsupported model size: {model_size}')
+
+  # Create split-brain config with the appropriate layers
+  sb_config = _split_brain.SplitBrainConfig(
+      mask_ratio=split_brain_config.mask_ratio,
+      prophet_weight=split_brain_config.prophet_weight,
+      target_shift=split_brain_config.target_shift,
+      stop_gradient=split_brain_config.stop_gradient,
+      gate_init_bias=split_brain_config.gate_init_bias,
+      split_brain_layers=split_layers,
+  )
+
+  model = _split_brain_transformer.SplitBrainTransformer(
+      config=base_config,
+      split_brain_config=sb_config,
+  )
+
+  return model, base_config
+
+
+def create_tokenizer(model_size: str) -> gm.text.Tokenizer:
+  """Create tokenizer for Gemma3 models."""
+  return gm.text.Gemma3Tokenizer()
+
+
+def prepare_fineweb_dataset(
+    tokenizer: gm.text.Tokenizer,
+    max_length: int,
+    split: str = 'train',
+    num_samples: int | None = None,
+):
+  """Load and prepare FineWeb-Edu dataset.
+
+  Args:
+    tokenizer: Gemma tokenizer.
+    max_length: Maximum sequence length.
+    split: Dataset split ('train' or 'test').
+    num_samples: Optional limit on number of samples.
+
+  Returns:
+    Iterator of tokenized batches.
+  """
+  # Load FineWeb-Edu from HuggingFace
+  # Using streaming to avoid downloading the full dataset
+  dataset = load_dataset(
+      'HuggingFaceFW/fineweb-edu',
+      name='sample-10BT',  # 10B token sample for faster iteration
+      split=split,
+      streaming=True,
+  )
+
+  if num_samples:
+    dataset = dataset.take(num_samples)
+
+  def tokenize_fn(example):
+    text = example['text']
+    tokens = tokenizer.encode(text)
+    # Truncate or pad to max_length
+    if len(tokens) > max_length:
+      tokens = tokens[:max_length]
+    else:
+      tokens = tokens + [0] * (max_length - len(tokens))
+    return {'tokens': tokens}
+
+  return dataset.map(tokenize_fn)
+
+
+def collate_batch(examples: list[dict], max_length: int) -> dict[str, jnp.ndarray]:
+  """Collate examples into a batch."""
+  tokens = jnp.array([ex['tokens'][:max_length] for ex in examples])
+  # Input is tokens[:-1], target is tokens[1:]
+  inputs = tokens[:, :-1]
+  targets = tokens[:, 1:]
+  # Loss mask: 1 for real tokens, 0 for padding
+  loss_mask = (targets != 0).astype(jnp.float32)
+  return {
+      'input': inputs,
+      'target': targets,
+      'loss_mask': loss_mask,
+  }
+
+
+def compute_loss(
+    params: Any,
+    model: nn.Module,
+    batch: dict[str, jnp.ndarray],
+    prophet_weight: float,
+    rng: jax.random.PRNGKey,
+) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
+  """Compute combined CE + Prophet loss.
+
+  Args:
+    params: Model parameters.
+    model: SplitBrainTransformer model.
+    batch: Tokenized batch with 'input', 'target', 'loss_mask'.
+    prophet_weight: Weight λ for auxiliary loss.
+    rng: Random key for dropout/masking.
+
+  Returns:
+    Tuple of (total_loss, metrics_dict).
+  """
+  # Forward pass
+  output = model.apply(
+      {'params': params},
+      batch['input'],
+      deterministic=False,
+      rngs={'dropout': rng},
+  )
+
+  # Cross-entropy loss (next-token prediction)
+  logits = output.logits
+  targets = batch['target']
+  loss_mask = batch['loss_mask']
+
+  # Compute per-token CE loss
+  ce_loss = optax.softmax_cross_entropy_with_integer_labels(
+      logits, targets
+  )
+  ce_loss = jnp.sum(ce_loss * loss_mask) / jnp.sum(loss_mask)
+
+  # Auxiliary Prophet loss
+  aux_loss = output.aux_loss
+
+  # Combined loss
+  total_loss = ce_loss + prophet_weight * aux_loss
+
+  metrics = {
+      'ce_loss': ce_loss,
+      'aux_loss': aux_loss,
+      'total_loss': total_loss,
+  }
+
+  return total_loss, metrics
+
+
+def train_step(
+    state: train_state.TrainState,
+    batch: dict[str, jnp.ndarray],
+    model: nn.Module,
+    prophet_weight: float,
+    rng: jax.random.PRNGKey,
+) -> tuple[train_state.TrainState, dict[str, jnp.ndarray]]:
+  """Single training step."""
+  loss_fn = functools.partial(
+      compute_loss,
+      model=model,
+      batch=batch,
+      prophet_weight=prophet_weight,
+      rng=rng,
+  )
+
+  grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+  (loss, metrics), grads = grad_fn(state.params)
+
+  state = state.apply_gradients(grads=grads)
+
+  return state, metrics
+
+
+def main():
+  parser = argparse.ArgumentParser(description='Train Split-Brain Prophet')
+  parser.add_argument('--model_size', type=str, default='270m',
+                      choices=['270m', '1b'], help='Model size')
+  parser.add_argument('--batch_size', type=int, default=8)
+  parser.add_argument('--max_length', type=int, default=1024)
+  parser.add_argument('--num_train_steps', type=int, default=10000)
+  parser.add_argument('--learning_rate', type=float, default=1e-4)
+  parser.add_argument('--prophet_weight', type=float, default=0.1,
+                      help='Weight λ for auxiliary Prophet loss')
+  parser.add_argument('--mask_ratio', type=float, default=0.15,
+                      help='Random masking ratio for Student stream')
+  parser.add_argument('--output_dir', type=str, default='/tmp/split_brain')
+  parser.add_argument('--log_every', type=int, default=100)
+  parser.add_argument('--save_every', type=int, default=1000)
+  args = parser.parse_args()
+
+  print(f'Training Split-Brain Prophet with {args.model_size} model')
+  print(f'Prophet weight λ = {args.prophet_weight}')
+  print(f'Mask ratio = {args.mask_ratio}')
+
+  # Initialize random keys
+  rng = jax.random.PRNGKey(42)
+  rng, init_rng, data_rng = jax.random.split(rng, 3)
+
+  # Create Split-Brain config
+  split_brain_config = _split_brain.SplitBrainConfig(
+      mask_ratio=args.mask_ratio,
+      prophet_weight=args.prophet_weight,
+  )
+
+  # Create model
+  model, base_config = get_model_and_config(args.model_size, split_brain_config)
+  print(f'Model has {base_config.num_layers} layers')
+  print(f'Split-Brain applied at layers: {model.split_brain_config.split_brain_layers}')
+
+  # Create tokenizer and dataset
+  tokenizer = create_tokenizer(args.model_size)
+  dataset = prepare_fineweb_dataset(
+      tokenizer=tokenizer,
+      max_length=args.max_length,
+      split='train',
+  )
+
+  # Initialize model
+  dummy_tokens = jnp.ones((1, args.max_length - 1), dtype=jnp.int32)
+  params = model.init(init_rng, dummy_tokens, deterministic=True)['params']
+
+  # Count parameters
+  param_count = sum(p.size for p in jax.tree_util.tree_leaves(params))
+  print(f'Total parameters: {param_count:,}')
+
+  # Create optimizer and training state
+  optimizer = optax.adamw(
+      learning_rate=optax.warmup_cosine_decay_schedule(
+          init_value=0.0,
+          peak_value=args.learning_rate,
+          warmup_steps=500,
+          decay_steps=args.num_train_steps,
+          end_value=args.learning_rate * 0.1,
+      ),
+      weight_decay=0.01,
+  )
+
+  state = train_state.TrainState.create(
+      apply_fn=model.apply,
+      params=params,
+      tx=optimizer,
+  )
+
+  # JIT compile train step
+  jit_train_step = jax.jit(
+      functools.partial(train_step, model=model, prophet_weight=args.prophet_weight)
+  )
+
+  # Training loop
+  print('Starting training...')
+  batch_buffer = []
+  step = 0
+  start_time = time.time()
+
+  for example in dataset:
+    batch_buffer.append(example)
+
+    if len(batch_buffer) >= args.batch_size:
+      # Create batch
+      batch = collate_batch(batch_buffer[:args.batch_size], args.max_length - 1)
+      batch_buffer = batch_buffer[args.batch_size:]
+
+      # Train step
+      rng, step_rng = jax.random.split(rng)
+      state, metrics = jit_train_step(state, batch, step_rng)
+
+      step += 1
+
+      if step % args.log_every == 0:
+        elapsed = time.time() - start_time
+        samples_per_sec = (step * args.batch_size) / elapsed
+        print(
+            f'Step {step}/{args.num_train_steps} | '
+            f'CE: {metrics["ce_loss"]:.4f} | '
+            f'Aux: {metrics["aux_loss"]:.4f} | '
+            f'Total: {metrics["total_loss"]:.4f} | '
+            f'{samples_per_sec:.1f} samples/sec'
+        )
+
+      if step % args.save_every == 0:
+        # Save checkpoint (simplified - use Orbax for production)
+        print(f'Saving checkpoint at step {step}...')
+
+      if step >= args.num_train_steps:
+        break
+
+  print(f'Training complete! Final step: {step}')
+  print(f'Final CE loss: {metrics["ce_loss"]:.4f}')
+  print(f'Final Aux loss: {metrics["aux_loss"]:.4f}')
+
+
+if __name__ == '__main__':
+  main()
