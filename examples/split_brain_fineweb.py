@@ -175,10 +175,10 @@ def collate_batch(examples: list[dict], max_length: int) -> dict[str, jnp.ndarra
 
 def compute_loss(
     params: Any,
-    model: nn.Module,
     batch: dict[str, jnp.ndarray],
-    prophet_weight: float,
     rng: jax.random.PRNGKey,
+    model: nn.Module,
+    prophet_weight: float,
 ) -> tuple[jnp.ndarray, dict[str, jnp.ndarray]]:
   """Compute combined CE + Prophet loss.
 
@@ -229,9 +229,9 @@ def compute_loss(
 def train_step(
     state: train_state.TrainState,
     batch: dict[str, jnp.ndarray],
+    rng: jax.random.PRNGKey,
     model: nn.Module,
     prophet_weight: float,
-    rng: jax.random.PRNGKey,
 ) -> tuple[train_state.TrainState, dict[str, jnp.ndarray]]:
   """Single training step."""
   loss_fn = functools.partial(
