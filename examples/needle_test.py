@@ -34,8 +34,13 @@ python examples/needle_test.py \
 """
 
 import argparse
+import os
 import random
+import sys
 from typing import Any
+
+# Ensure we import the local gemma package, not the installed one
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flax import linen as nn
 from gemma import gm

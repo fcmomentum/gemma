@@ -51,8 +51,14 @@ python examples/split_brain_fineweb.py \
 
 import argparse
 import functools
+import os
+import sys
 import time
 from typing import Any
+
+# Ensure we import the local gemma package, not the installed one
+# This allows access to the new _split_brain module that isn't in site-packages
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datasets import load_dataset
 from flax import linen as nn
