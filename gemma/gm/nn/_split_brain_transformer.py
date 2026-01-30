@@ -85,8 +85,8 @@ class SplitBrainTransformer(nn.Module):
 
     # Build blocks - use SplitBrainBlock at specified layer indices
     split_layers = set(self.split_brain_config.split_brain_layers)
-    self.blocks = []
-    self.split_brain_indices = []
+    blocks = []
+    split_brain_indices = []
 
     for i, attn_type in enumerate(self.config.attention_types):
       if i in split_layers:
@@ -114,7 +114,7 @@ class SplitBrainTransformer(nn.Module):
             if attn_type == _modules.AttentionType.LOCAL_SLIDING
             else self.config.global_scale_factor,
         )
-        self.split_brain_indices.append(i)
+        split_brain_indices.append(i)
       else:
         # Use standard block
         block = _modules.Block(
@@ -139,7 +139,10 @@ class SplitBrainTransformer(nn.Module):
             if attn_type == _modules.AttentionType.LOCAL_SLIDING
             else self.config.global_scale_factor,
         )
-      self.blocks.append(block)
+      blocks.append(block)
+
+    self.blocks = blocks
+    self.split_brain_indices = split_brain_indices
 
     self.final_norm = _layers.RMSNorm()
 
