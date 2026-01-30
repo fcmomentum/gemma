@@ -282,7 +282,13 @@ def main():
                       help='Comma-separated depth values (0.0-1.0)')
   parser.add_argument('--num_trials', type=int, default=10,
                       help='Number of trials per (length, depth) pair')
+  parser.add_argument('--jax_cache_dir', type=str, default='/tmp/jax_cache',
+                      help='Directory to store JAX compilation cache')
   args = parser.parse_args()
+
+  # Enable JAX compilation cache
+  jax.config.update('jax_compilation_cache_dir', args.jax_cache_dir)
+  print(f'JAX compilation cache enabled at: {args.jax_cache_dir}')
 
   # Parse context lengths and depths
   context_lengths = [int(x) for x in args.context_lengths.split(',')]

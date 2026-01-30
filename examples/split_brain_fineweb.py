@@ -332,7 +332,13 @@ def main():
                       help='W&B project name (set to empty to disable)')
   parser.add_argument('--wandb_run_name', type=str, default=None,
                       help='W&B run name (auto-generated if not set)')
+  parser.add_argument('--jax_cache_dir', type=str, default='/tmp/jax_cache',
+                      help='Directory to store JAX compilation cache')
   args = parser.parse_args()
+
+  # Enable JAX compilation cache
+  jax.config.update('jax_compilation_cache_dir', args.jax_cache_dir)
+  print(f'JAX compilation cache enabled at: {args.jax_cache_dir}')
 
   # Initialize W&B
   if args.wandb_project:
