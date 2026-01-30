@@ -356,7 +356,7 @@ class SplitBrainBlock(nn.Module):
     if config.stop_gradient:
       teacher_target = jax.lax.stop_gradient(teacher_target)
 
-    # MSE loss
-    loss = jnp.mean((student_pred - teacher_target) ** 2)
+    # MSE loss - reduce over length and features, keep batch dim
+    loss = jnp.mean((student_pred - teacher_target) ** 2, axis=(1, 2))
 
     return loss

@@ -211,8 +211,8 @@ def compute_loss(
   )
   ce_loss = jnp.sum(ce_loss * loss_mask) / jnp.sum(loss_mask)
 
-  # Auxiliary Prophet loss
-  aux_loss = output.aux_loss
+  # Auxiliary Prophet loss (came back as [B], need scalar)
+  aux_loss = jnp.mean(output.aux_loss)
 
   # Combined loss
   total_loss = ce_loss + prophet_weight * aux_loss

@@ -275,9 +275,13 @@ class SplitBrainTransformer(nn.Module):
 
     # Sum auxiliary losses from all Split-Brain layers
     if aux_losses:
-      total_aux_loss = jnp.sum(jnp.stack(aux_losses))
+      # Stack: [num_layers, B]
+      # Sum over layers to get [B]
+      total_aux_loss = jnp.sum(jnp.stack(aux_losses), axis=0)
     else:
-      total_aux_loss = jnp.array(0.0)
+      # Return zero array with batch size
+      batch_size = x.shape[0]
+      total_aux_loss = jnp.zeros((batch_size,), dtype=jnp.float32)
 
     return x, new_cache, total_aux_loss
 
