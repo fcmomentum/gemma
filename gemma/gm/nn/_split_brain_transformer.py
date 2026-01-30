@@ -51,7 +51,7 @@ class SplitBrainOutput:
   logits: Float['*B L V'] | Float['*B V']
   cache: _config.Cache | None
   hidden_states: Float['*B L D'] | Float['*B D'] | None
-  aux_loss: Float[''] | None  # Scalar auxiliary loss
+  aux_loss: Float['*B'] | None  # Batched auxiliary loss (per example)
 
 
 class SplitBrainTransformer(nn.Module):
