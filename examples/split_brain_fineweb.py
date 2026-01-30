@@ -63,6 +63,7 @@ from gemma.gm.nn import _split_brain_transformer
 import jax
 import jax.numpy as jnp
 import optax
+import wandb
 
 
 # Layer indices where Split-Brain is applied (75% depth as per PRD)
@@ -243,6 +244,71 @@ def train_step(
   return state, metrics
 
 
+def eval_step(
+    params: Any,
+    batch: dict[str, jnp.ndarray],
+    model: nn.Module,
+) -> dict[str, jnp.ndarray]:
+  """Single evaluation step (deterministic, no gradient)."""
+  # Forward pass with deterministic=True (no random masking)
+  output = model.apply(
+      {'params': params},
+      batch['input'],
+      deterministic=True,
+  )
+
+  # Cross-entropy loss
+  logits = output.logits
+  targets = batch['target']
+  loss_mask = batch['loss_mask']
+
+  ce_loss = optax.softmax_cross_entropy_with_integer_labels(logits, targets)
+  ce_loss = jnp.sum(ce_loss * loss_mask) / jnp.sum(loss_mask)
+
+  # Perplexity
+  ppl = jnp.exp(ce_loss)
+
+  return {
+      'val_ce_loss': ce_loss,
+      'val_ppl': ppl,
+      'val_aux_loss': output.aux_loss,
+  }
+
+
+def run_validation(
+    state: train_state.TrainState,
+    val_dataset,
+    model: nn.Module,
+    batch_size: int,
+    max_length: int,
+    num_val_batches: int = 50,
+) -> dict[str, float]:
+  """Run validation on a subset of the validation set."""
+  jit_eval_step = jax.jit(functools.partial(eval_step, model=model))
+
+  val_metrics = {'val_ce_loss': [], 'val_ppl': [], 'val_aux_loss': []}
+  batch_buffer = []
+  batch_count = 0
+
+  for example in val_dataset:
+    batch_buffer.append(example)
+
+    if len(batch_buffer) >= batch_size:
+      batch = collate_batch(batch_buffer[:batch_size], max_length - 1)
+      batch_buffer = batch_buffer[batch_size:]
+
+      metrics = jit_eval_step(state.params, batch)
+      for k, v in metrics.items():
+        val_metrics[k].append(float(v))
+
+      batch_count += 1
+      if batch_count >= num_val_batches:
+        break
+
+  # Average metrics
+  return {k: sum(v) / len(v) if v else 0.0 for k, v in val_metrics.items()}
+
+
 def main():
   parser = argparse.ArgumentParser(description='Train Split-Brain Prophet')
   parser.add_argument('--model_size', type=str, default='270m',
@@ -258,7 +324,31 @@ def main():
   parser.add_argument('--output_dir', type=str, default='/tmp/split_brain')
   parser.add_argument('--log_every', type=int, default=100)
   parser.add_argument('--save_every', type=int, default=1000)
+  parser.add_argument('--eval_every', type=int, default=500,
+                      help='Run validation every N steps')
+  parser.add_argument('--num_val_batches', type=int, default=50,
+                      help='Number of batches for validation')
+  parser.add_argument('--wandb_project', type=str, default='split-brain-prophet',
+                      help='W&B project name (set to empty to disable)')
+  parser.add_argument('--wandb_run_name', type=str, default=None,
+                      help='W&B run name (auto-generated if not set)')
   args = parser.parse_args()
+
+  # Initialize W&B
+  if args.wandb_project:
+    wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_run_name or f'split-brain-{args.model_size}',
+        config={
+            'model_size': args.model_size,
+            'batch_size': args.batch_size,
+            'max_length': args.max_length,
+            'num_train_steps': args.num_train_steps,
+            'learning_rate': args.learning_rate,
+            'prophet_weight': args.prophet_weight,
+            'mask_ratio': args.mask_ratio,
+        },
+    )
 
   print(f'Training Split-Brain Prophet with {args.model_size} model')
   print(f'Prophet weight λ = {args.prophet_weight}')
@@ -279,12 +369,19 @@ def main():
   print(f'Model has {base_config.num_layers} layers')
   print(f'Split-Brain applied at layers: {model.split_brain_config.split_brain_layers}')
 
-  # Create tokenizer and dataset
+  # Create tokenizer and datasets (train + validation)
   tokenizer = create_tokenizer(args.model_size)
-  dataset = prepare_fineweb_dataset(
+  train_dataset = prepare_fineweb_dataset(
       tokenizer=tokenizer,
       max_length=args.max_length,
       split='train',
+  )
+  # Validation dataset (separate stream)
+  val_dataset = prepare_fineweb_dataset(
+      tokenizer=tokenizer,
+      max_length=args.max_length,
+      split='train',  # FineWeb-Edu uses 'train' split; we'll skip first N samples
+      num_samples=args.num_val_batches * args.batch_size * 2,
   )
 
   # Initialize model
@@ -324,7 +421,7 @@ def main():
   step = 0
   start_time = time.time()
 
-  for example in dataset:
+  for example in train_dataset:
     batch_buffer.append(example)
 
     if len(batch_buffer) >= args.batch_size:
@@ -348,10 +445,43 @@ def main():
             f'Total: {metrics["total_loss"]:.4f} | '
             f'{samples_per_sec:.1f} samples/sec'
         )
+        # Log to W&B
+        if args.wandb_project:
+          wandb.log({
+              'train/ce_loss': float(metrics['ce_loss']),
+              'train/aux_loss': float(metrics['aux_loss']),
+              'train/total_loss': float(metrics['total_loss']),
+              'train/samples_per_sec': samples_per_sec,
+          }, step=step)
 
       if step % args.save_every == 0:
         # Save checkpoint (simplified - use Orbax for production)
         print(f'Saving checkpoint at step {step}...')
+
+      # Run validation
+      if step % args.eval_every == 0:
+        print(f'\n=== Validation at step {step} ===')
+        val_metrics = run_validation(
+            state=state,
+            val_dataset=val_dataset,
+            model=model,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            num_val_batches=args.num_val_batches,
+        )
+        print(
+            f'Val CE: {val_metrics["val_ce_loss"]:.4f} | '
+            f'Val PPL: {val_metrics["val_ppl"]:.2f} | '
+            f'Val Aux: {val_metrics["val_aux_loss"]:.4f}'
+        )
+        print('=' * 40 + '\n')
+        # Log validation to W&B
+        if args.wandb_project:
+          wandb.log({
+              'val/ce_loss': val_metrics['val_ce_loss'],
+              'val/ppl': val_metrics['val_ppl'],
+              'val/aux_loss': val_metrics['val_aux_loss'],
+          }, step=step)
 
       if step >= args.num_train_steps:
         break
@@ -359,6 +489,10 @@ def main():
   print(f'Training complete! Final step: {step}')
   print(f'Final CE loss: {metrics["ce_loss"]:.4f}')
   print(f'Final Aux loss: {metrics["aux_loss"]:.4f}')
+
+  # Finish W&B run
+  if args.wandb_project:
+    wandb.finish()
 
 
 if __name__ == '__main__':
