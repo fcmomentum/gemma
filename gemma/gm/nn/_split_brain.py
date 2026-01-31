@@ -377,19 +377,9 @@ class SplitBrainBlock(nn.Module):
     if config.stop_gradient:
       teacher_target = jax.lax.stop_gradient(teacher_target)
 
-    if config.stop_gradient:
-      teacher_target = jax.lax.stop_gradient(teacher_target)
 
-    # Unconditional debug print to check if this code is running
-    jax.debug.print("DEBUG: Inside loss calc. config.use_dino_loss={}", config.use_dino_loss)
 
     if config.use_dino_loss:
-      # specific debug print to confirm path
-      jax.debug.print("--- DINO DEBUG ---")
-      jax.debug.print("Student logits: min={}, max={}, mean={}",
-                      jnp.min(student_pred), jnp.max(student_pred), jnp.mean(student_pred))
-      jax.debug.print("Teacher logits: min={}, max={}, mean={}",
-                      jnp.min(teacher_target), jnp.max(teacher_target), jnp.mean(teacher_target))
       # DINO-style loss: Cross-Entropy between Softmax(S/t_s) and Softmax(T/t_t)
       # Normalize over feature dimension
       student_logits = student_pred / config.student_temp
@@ -402,14 +392,11 @@ class SplitBrainBlock(nn.Module):
       teacher_probs = jax.nn.softmax(teacher_logits, axis=-1)
 
       # Cross-entropy: -sum(P_t * log(P_s))
-      # Sum over feature dimension (-1), Mean over batch/seq (0, 1) to match decorated batch-preservation?
-      # Wait, previous fix required preserving batch dim (0).
-      # So we sum over features (-1), then mean over sequence (1)
+      # Sum over features (-1), then mean over sequence (1)
       loss_per_token = -jnp.sum(teacher_probs * student_log_probs, axis=-1)
 
       # Reduce over sequence length, keep batch dimension [B]
       loss = jnp.mean(loss_per_token, axis=1)
-      jax.debug.print("DINO Loss mean: {}", jnp.mean(loss))
 
     else:
       # MSE loss - reduce over length and features, keep batch dim
