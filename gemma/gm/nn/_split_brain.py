@@ -379,7 +379,11 @@ class SplitBrainBlock(nn.Module):
 
     if config.use_dino_loss:
       # specific debug print to confirm path
-      # jax.debug.print("Computing DINO loss")
+      jax.debug.print("--- DINO DEBUG ---")
+      jax.debug.print("Student logits: min={}, max={}, mean={}",
+                      jnp.min(student_pred), jnp.max(student_pred), jnp.mean(student_pred))
+      jax.debug.print("Teacher logits: min={}, max={}, mean={}",
+                      jnp.min(teacher_target), jnp.max(teacher_target), jnp.mean(teacher_target))
       # DINO-style loss: Cross-Entropy between Softmax(S/t_s) and Softmax(T/t_t)
       # Normalize over feature dimension
       student_logits = student_pred / config.student_temp
@@ -399,6 +403,7 @@ class SplitBrainBlock(nn.Module):
 
       # Reduce over sequence length, keep batch dimension [B]
       loss = jnp.mean(loss_per_token, axis=1)
+      jax.debug.print("DINO Loss mean: {}", jnp.mean(loss))
 
     else:
       # MSE loss - reduce over length and features, keep batch dim
