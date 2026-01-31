@@ -250,6 +250,7 @@ def prepare_fineweb_dataset(
     max_length: int,
     split: str = 'train',
     num_samples: int | None = None,
+    skip: int = 0,
 ):
   """Load and prepare FineWeb-Edu dataset.
 
@@ -258,6 +259,7 @@ def prepare_fineweb_dataset(
     max_length: Maximum sequence length.
     split: Dataset split ('train' or 'test').
     num_samples: Optional limit on number of samples.
+    skip: Number of samples to skip from the start.
 
   Returns:
     Iterator of tokenized batches.
@@ -270,6 +272,9 @@ def prepare_fineweb_dataset(
       split=split,
       streaming=True,
   )
+
+  if skip > 0:
+    dataset = dataset.skip(skip)
 
   if num_samples:
     dataset = dataset.take(num_samples)
@@ -540,17 +545,24 @@ def main():
 
   # Create tokenizer and datasets (train + validation)
   tokenizer = create_tokenizer(args.model_size)
+
+  # Calculate number of validation samples
+  num_val_samples = args.num_val_batches * args.batch_size * 2
+
+  # Validation dataset (separate stream, first N samples)
+  val_dataset = prepare_fineweb_dataset(
+      tokenizer=tokenizer,
+      max_length=args.max_length,
+      split='train',  # FineWeb-Edu uses 'train' split
+      num_samples=num_val_samples,
+  )
+
+  # Train dataset (skip validation samples)
   train_dataset = prepare_fineweb_dataset(
       tokenizer=tokenizer,
       max_length=args.max_length,
       split='train',
-  )
-  # Validation dataset (separate stream)
-  val_dataset = prepare_fineweb_dataset(
-      tokenizer=tokenizer,
-      max_length=args.max_length,
-      split='train',  # FineWeb-Edu uses 'train' split; we'll skip first N samples
-      num_samples=args.num_val_batches * args.batch_size * 2,
+      skip=num_val_samples,
   )
 
   # Initialize model (random init)
