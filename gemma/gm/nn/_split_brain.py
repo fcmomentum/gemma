@@ -377,6 +377,12 @@ class SplitBrainBlock(nn.Module):
     if config.stop_gradient:
       teacher_target = jax.lax.stop_gradient(teacher_target)
 
+    if config.stop_gradient:
+      teacher_target = jax.lax.stop_gradient(teacher_target)
+
+    # Unconditional debug print to check if this code is running
+    jax.debug.print("DEBUG: Inside loss calc. config.use_dino_loss={}", config.use_dino_loss)
+
     if config.use_dino_loss:
       # specific debug print to confirm path
       jax.debug.print("--- DINO DEBUG ---")
