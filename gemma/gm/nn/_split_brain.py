@@ -40,6 +40,9 @@ class SplitBrainConfig:
   stop_gradient: bool = True  # Detach Teacher target from gradient
   gate_init_bias: float = 2.0  # Gate bias init (sigmoid(2.0) ≈ 0.88)
   split_brain_layers: tuple[int, ...] = ()  # Layer indices to apply Split-Brain
+  student_temp: float = 0.1  # Student softmax temperature
+  teacher_temp: float = 0.04  # Teacher softmax temperature (sharpening)
+  use_dino_loss: bool = False  # Toggle DINO loss vs MSE
 
 
 class GatedFusion(nn.Module):
@@ -374,7 +377,29 @@ class SplitBrainBlock(nn.Module):
     if config.stop_gradient:
       teacher_target = jax.lax.stop_gradient(teacher_target)
 
-    # MSE loss - reduce over length and features, keep batch dim
-    loss = jnp.mean((student_pred - teacher_target) ** 2, axis=(1, 2))
+    if config.use_dino_loss:
+      # DINO-style loss: Cross-Entropy between Softmax(S/t_s) and Softmax(T/t_t)
+      # Normalize over feature dimension
+      student_logits = student_pred / config.student_temp
+      teacher_logits = teacher_target / config.teacher_temp
+
+      # Log-softmax for student
+      student_log_probs = jax.nn.log_softmax(student_logits, axis=-1)
+
+      # Softmax for teacher
+      teacher_probs = jax.nn.softmax(teacher_logits, axis=-1)
+
+      # Cross-entropy: -sum(P_t * log(P_s))
+      # Sum over feature dimension (-1), Mean over batch/seq (0, 1) to match decorated batch-preservation?
+      # Wait, previous fix required preserving batch dim (0).
+      # So we sum over features (-1), then mean over sequence (1)
+      loss_per_token = -jnp.sum(teacher_probs * student_log_probs, axis=-1)
+
+      # Reduce over sequence length, keep batch dimension [B]
+      loss = jnp.mean(loss_per_token, axis=1)
+
+    else:
+      # MSE loss - reduce over length and features, keep batch dim
+      loss = jnp.mean((student_pred - teacher_target) ** 2, axis=(1, 2))
 
     return loss

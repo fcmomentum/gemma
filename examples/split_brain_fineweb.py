@@ -329,6 +329,12 @@ def main():
                       help='Random masking ratio for Student stream')
   parser.add_argument('--target_shift', type=int, default=1,
                       help='Look-ahead shift for Prophet loss (default 1)')
+  parser.add_argument('--use_dino_loss', action='store_true',
+                      help='Use DINO-style Cross-Entropy loss instead of MSE')
+  parser.add_argument('--student_temp', type=float, default=0.1,
+                      help='Student temperature for DINO loss')
+  parser.add_argument('--teacher_temp', type=float, default=0.04,
+                      help='Teacher temperature for DINO loss')
   parser.add_argument('--output_dir', type=str, default='/tmp/split_brain')
   parser.add_argument('--log_every', type=int, default=100)
   parser.add_argument('--save_every', type=int, default=1000)
@@ -362,6 +368,9 @@ def main():
             'prophet_weight': args.prophet_weight,
             'mask_ratio': args.mask_ratio,
             'target_shift': args.target_shift,
+            'use_dino_loss': args.use_dino_loss,
+            'student_temp': args.student_temp,
+            'teacher_temp': args.teacher_temp,
         },
     )
 
@@ -379,6 +388,9 @@ def main():
       mask_ratio=args.mask_ratio,
       prophet_weight=args.prophet_weight,
       target_shift=args.target_shift,
+      use_dino_loss=args.use_dino_loss,
+      student_temp=args.student_temp,
+      teacher_temp=args.teacher_temp,
   )
 
   # Create model
