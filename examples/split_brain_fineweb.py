@@ -327,6 +327,8 @@ def main():
                       help='Weight λ for auxiliary Prophet loss')
   parser.add_argument('--mask_ratio', type=float, default=0.5,
                       help='Random masking ratio for Student stream')
+  parser.add_argument('--target_shift', type=int, default=1,
+                      help='Look-ahead shift for Prophet loss (default 1)')
   parser.add_argument('--output_dir', type=str, default='/tmp/split_brain')
   parser.add_argument('--log_every', type=int, default=100)
   parser.add_argument('--save_every', type=int, default=1000)
@@ -359,12 +361,14 @@ def main():
             'learning_rate': args.learning_rate,
             'prophet_weight': args.prophet_weight,
             'mask_ratio': args.mask_ratio,
+            'target_shift': args.target_shift,
         },
     )
 
   print(f'Training Split-Brain Prophet with {args.model_size} model')
   print(f'Prophet weight λ = {args.prophet_weight}')
   print(f'Mask ratio = {args.mask_ratio}')
+  print(f'Target shift = {args.target_shift}')
 
   # Initialize random keys
   rng = jax.random.PRNGKey(42)
@@ -374,6 +378,7 @@ def main():
   split_brain_config = _split_brain.SplitBrainConfig(
       mask_ratio=args.mask_ratio,
       prophet_weight=args.prophet_weight,
+      target_shift=args.target_shift,
   )
 
   # Create model
