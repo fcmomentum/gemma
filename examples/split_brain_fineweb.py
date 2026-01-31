@@ -68,8 +68,11 @@ from gemma.gm.nn import _split_brain
 from gemma.gm.nn import _split_brain_transformer
 import jax
 import jax.numpy as jnp
+import kagglehub
 import optax
 import wandb
+from gemma.gm.ckpts import _checkpoint
+
 
 
 # Layer indices where Split-Brain is applied (75% depth as per PRD)
@@ -122,6 +125,118 @@ def get_model_and_config(
   )
 
   return model, base_config
+
+
+def adapt_params(
+    params: dict[str, Any],
+    split_brain_layers: tuple[int, ...],
+) -> dict[str, Any]:
+  """Adapt standard Gemma params to Split-Brain architecture.
+
+  For split-brain layers:
+  1. Initialize teacher_attn with pretrained attn weights.
+  2. Initialize student_attn with pretrained attn weights.
+  3. Gated fusion and other new params remain uninitialized (will be merged later).
+  """
+  new_params = jax.tree_util.tree_map(lambda x: x, params)  # Copy
+
+  # Navigate to transformer/layer_X
+  if 'transformer' in new_params:
+    transformer = new_params['transformer']
+  else:
+    # Handle flat or other structures if necessary, but _checkpoint.load_params
+    # usually returns nested 'transformer' dict for our usage
+    transformer = new_params
+
+  for i in split_brain_layers:
+    layer_name = f'layer_{i}'
+    if layer_name not in transformer:
+      continue
+
+    layer = transformer[layer_name]
+
+    # Check if this is a standard layer with 'attn'
+    if 'attn' in layer:
+      attn_params = layer.pop('attn')
+
+      # Create split_attn structure
+      split_attn = {
+          'teacher': attn_params,
+          'student': attn_params, # Initialize student with same weights
+      }
+
+      layer['split_attn'] = split_attn
+
+      # Note: 'gated_fusion' params are not in pretrained checkpoint,
+      # so they won't be in this dict. We rely on merging with initialized params.
+
+  return new_params
+
+
+def load_pretrained_params(
+    model_size: str,
+    split_brain_layers: tuple[int, ...],
+    target_params_shape: Any,
+) -> Any:
+  """Download and adapt pretrained parameters."""
+
+  # Map model size to Kaggle handle
+  # Using instruction tuned variants as requested
+  if model_size == '270m':
+    # Assuming 270m variant follows similar naming, though often smaller models
+    # might be 2b. User asked for 270m.
+    # If 270m doesn't exist on Kaggle, this will fail.
+    # Standard Gemma 2/3 usually starts at 2B/1B.
+    # Gemma 3 might have smaller variants.
+    # We will use the handle provided in the user request context or infer it.
+    handle = 'google/gemma-3/flax/gemma3-1b-it' # User asked for 270m, but let's check validation.
+    # WAIT: User request said "google/gemma-3-1b-it and google/gemma-3-270m-it"
+    # I should use those handles. If 270m doesn't exist, I'll stick to what they asked.
+    handle = 'google/gemma-3/flax/gemma3-270m-it'
+  elif model_size == '1b':
+    handle = 'google/gemma-3/flax/gemma3-1b-it'
+  else:
+    raise ValueError(f"Unknown model size for pretraining: {model_size}")
+
+  print(f"Downloading pretrained model: {handle}...")
+  try:
+    path = kagglehub.model_download(handle)
+  except Exception as e:
+    raise RuntimeError(f"Failed to download model {handle}: {e}")
+
+  print(f"Loading parameters from {path}...")
+  # Load params using checking utils
+  # We use the structure of target_params_shape to inform loading if needed,
+  # but here we mostly want the raw weights to adapt them.
+  # We use standard load_params.
+  # Note: loaded params might need to be cast or processed.
+  loaded_params = _checkpoint.load_params(path)
+
+  print("Adapting parameters to Split-Brain architecture...")
+  adapted_params = adapt_params(loaded_params, split_brain_layers)
+
+  return adapted_params
+
+
+def merge_params(target_params, loaded_params):
+    """Recursively merge loaded parameters into initialized target parameters.
+
+    Values in loaded_params override target_params.
+    Values present in target_params but missing in loaded_params are kept (random init).
+    """
+    if isinstance(target_params, dict) and isinstance(loaded_params, dict):
+        new_dict = target_params.copy()
+        for k, v in loaded_params.items():
+            if k in new_dict:
+                new_dict[k] = merge_params(new_dict[k], v)
+            else:
+                # Extra params in loaded (e.g. maybe unused internals), we accept them
+                # or we could ignore them. For now, let's keep valid keys.
+                 pass
+        return new_dict
+    else:
+        return loaded_params
+
 
 
 def create_tokenizer(model_size: str) -> gm.text.Tokenizer:
@@ -350,6 +465,8 @@ def main():
                       help='Teacher temperature for DINO loss')
   parser.add_argument('--split_brain_layers', type=str, default=None,
                       help='Comma-separated layer indices (e.g., "13,14,15"). Defaults to 75% depth.')
+  parser.add_argument('--use_pretrained', action='store_true',
+                      help='Initialize with pretrained Gemma 3 weights')
   parser.add_argument('--output_dir', type=str, default='/tmp/split_brain')
   parser.add_argument('--log_every', type=int, default=100)
   parser.add_argument('--save_every', type=int, default=1000)
@@ -435,9 +552,36 @@ def main():
       num_samples=args.num_val_batches * args.batch_size * 2,
   )
 
-  # Initialize model
+  # Initialize model (random init)
   dummy_tokens = jnp.ones((1, args.max_length - 1), dtype=jnp.int32)
   params = model.init(init_rng, dummy_tokens, deterministic=True)['params']
+
+  # Load pretrained weights if requested
+  if args.use_pretrained:
+    adapted_params = load_pretrained_params(
+        args.model_size,
+        model.split_brain_config.split_brain_layers,
+        params
+    )
+    # Merge: keep random init for new params (e.g. gates), overwrite shared ones
+    # We use a custom merge or rely on the fact that dict structures match
+    # except for missing keys in adapted_params.
+
+    # Simple recursive merge helper
+    def recursive_merge(target, source):
+      if isinstance(target, dict):
+        # If source is also dict, recurse
+        if isinstance(source, dict):
+          for k, v in source.items():
+             if k in target:
+               target[k] = recursive_merge(target[k], v)
+        return target
+      else:
+        # Leaf: if source provided, use it
+        return source
+
+    print("Merging pretrained weights...")
+    params = recursive_merge(params, adapted_params)
 
   # Count parameters
   param_count = sum(p.size for p in jax.tree_util.tree_leaves(params))
