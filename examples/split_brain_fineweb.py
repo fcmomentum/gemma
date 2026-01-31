@@ -101,6 +101,9 @@ def get_model_and_config(
       stop_gradient=split_brain_config.stop_gradient,
       gate_init_bias=split_brain_config.gate_init_bias,
       split_brain_layers=split_layers,
+      use_dino_loss=split_brain_config.use_dino_loss,
+      student_temp=split_brain_config.student_temp,
+      teacher_temp=split_brain_config.teacher_temp,
   )
 
   model = _split_brain_transformer.SplitBrainTransformer(
