@@ -474,6 +474,8 @@ def main():
   parser.add_argument('--use_pretrained', action='store_true',
                       help='Initialize with pretrained Gemma 3 weights')
   parser.add_argument('--output_dir', type=str, default='/tmp/split_brain')
+  parser.add_argument('--restore_dir', type=str, default=None,
+                      help='Directory to restore checkpoint from')
   parser.add_argument('--log_every', type=int, default=100)
   parser.add_argument('--save_every', type=int, default=1000)
   parser.add_argument('--eval_every', type=int, default=500,
@@ -546,23 +548,27 @@ def main():
   # Create tokenizer and datasets (train + validation)
   tokenizer = create_tokenizer(args.model_size)
 
-  # Calculate number of validation samples
-  num_val_samples = args.num_val_batches * args.batch_size * 2
-
-  # Validation dataset (separate stream, first N samples)
-  val_dataset = prepare_fineweb_dataset(
-      tokenizer=tokenizer,
-      max_length=args.max_length,
-      split='train',  # FineWeb-Edu uses 'train' split
-      num_samples=num_val_samples,
-  )
-
-  # Train dataset (skip validation samples)
+  # Train dataset (starts from 0)
   train_dataset = prepare_fineweb_dataset(
       tokenizer=tokenizer,
       max_length=args.max_length,
       split='train',
-      skip=num_val_samples,
+      skip=0,
+  )
+
+  # Validation dataset (starts after training + buffer)
+  # Ensure we validate on "future" data not seen during training
+  total_train_samples = args.num_train_steps * args.batch_size
+  val_buffer = 10000
+  val_start_offset = total_train_samples + val_buffer
+  num_val_samples = args.num_val_batches * args.batch_size * 2
+
+  val_dataset = prepare_fineweb_dataset(
+      tokenizer=tokenizer,
+      max_length=args.max_length,
+      split='train',
+      skip=val_start_offset,
+      num_samples=num_val_samples,
   )
 
   # Initialize model (random init)
@@ -623,10 +629,16 @@ def main():
       functools.partial(train_step, model=model, prophet_weight=args.prophet_weight)
   )
 
+  # Restore checkpoint if requested
+  if args.restore_dir:
+    print(f'Restoring checkpoint from {args.restore_dir}...')
+    state = checkpoints.restore_checkpoint(ckpt_dir=args.restore_dir, target=state)
+    print(f'Resumed from step {int(state.step)}')
+
   # Training loop
   print('Starting training...')
   batch_buffer = []
-  step = 0
+  step = int(state.step)
   start_time = time.time()
 
   for example in train_dataset:
