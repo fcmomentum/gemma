@@ -68,7 +68,7 @@ from gemma.gm.nn import _split_brain
 from gemma.gm.nn import _split_brain_transformer
 import jax
 import jax.numpy as jnp
-import kagglehub
+
 import optax
 import wandb
 from gemma.gm.ckpts import _checkpoint
@@ -183,24 +183,18 @@ def load_pretrained_params(
   # Map model size to Kaggle handle
   # Using instruction tuned variants as requested
   if model_size == '270m':
-    # Assuming 270m variant follows similar naming, though often smaller models
-    # might be 2b. User asked for 270m.
-    # If 270m doesn't exist on Kaggle, this will fail.
-    # Standard Gemma 2/3 usually starts at 2B/1B.
-    # Gemma 3 might have smaller variants.
-    # We will use the handle provided in the user request context or infer it.
-    handle = 'google/gemma-3/flax/gemma3-1b-it' # User asked for 270m, but let's check validation.
-    # WAIT: User request said "google/gemma-3-1b-it and google/gemma-3-270m-it"
-    # I should use those handles. If 270m doesn't exist, I'll stick to what they asked.
-    handle = 'google/gemma-3/flax/gemma3-270m-it'
+    handle = 'google/gemma-3-270m-it'
   elif model_size == '1b':
-    handle = 'google/gemma-3/flax/gemma3-1b-it'
+    handle = 'google/gemma-3-1b-it'
   else:
     raise ValueError(f"Unknown model size for pretraining: {model_size}")
 
-  print(f"Downloading pretrained model: {handle}...")
+  print(f"Downloading pretrained model from HF: {handle}...")
   try:
-    path = kagglehub.model_download(handle)
+    import huggingface_hub
+    path = huggingface_hub.snapshot_download(handle)
+  except ImportError:
+    raise ImportError("Please install huggingface_hub to use pretrained models: pip install huggingface_hub")
   except Exception as e:
     raise RuntimeError(f"Failed to download model {handle}: {e}")
 
