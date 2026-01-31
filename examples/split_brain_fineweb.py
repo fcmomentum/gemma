@@ -182,29 +182,31 @@ def load_pretrained_params(
 
   # Map model size to Kaggle handle
   # Using instruction tuned variants as requested
+  # Map model size to CheckpointPath
+  # Using instruction tuned variants as requested
   if model_size == '270m':
-    handle = 'google/gemma-3-270m-it'
+    ckpt_path = gm.ckpts.CheckpointPath.GEMMA3_270M_IT
   elif model_size == '1b':
-    handle = 'google/gemma-3-1b-it'
+    ckpt_path = gm.ckpts.CheckpointPath.GEMMA3_1B_IT
   else:
     raise ValueError(f"Unknown model size for pretraining: {model_size}")
 
-  print(f"Downloading pretrained model from HF: {handle}...")
-  try:
-    import huggingface_hub
-    path = huggingface_hub.snapshot_download(handle)
-  except ImportError:
-    raise ImportError("Please install huggingface_hub to use pretrained models: pip install huggingface_hub")
-  except Exception as e:
-    raise RuntimeError(f"Failed to download model {handle}: {e}")
+  print(f"Loading pretrained model from: {ckpt_path}...")
 
-  print(f"Loading parameters from {path}...")
-  # Load params using checking utils
-  # We use the structure of target_params_shape to inform loading if needed,
-  # but here we mostly want the raw weights to adapt them.
-  # We use standard load_params.
-  # Note: loaded params might need to be cast or processed.
-  loaded_params = _checkpoint.load_params(path)
+  # Load params using native gemma loader
+  try:
+    loaded_params = gm.ckpts.load_params(ckpt_path)
+  except Exception as e:
+    raise RuntimeError(
+        f"Failed to load params from {ckpt_path}. "
+        "Ensure you have access to the checkpoints (e.g. GCS setup). "
+        f"Error: {e}"
+    )
+
+  print("Adapting parameters to Split-Brain architecture...")
+  adapted_params = adapt_params(loaded_params, split_brain_layers)
+
+  return adapted_params
 
   print("Adapting parameters to Split-Brain architecture...")
   adapted_params = adapt_params(loaded_params, split_brain_layers)
