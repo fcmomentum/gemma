@@ -62,7 +62,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datasets import load_dataset
 from flax import linen as nn
-from flax.training import train_state
+from flax.training import train_state, checkpoints
 from gemma import gm
 from gemma.gm.nn import _split_brain
 from gemma.gm.nn import _split_brain_transformer
@@ -490,8 +490,15 @@ def main():
           }, step=step)
 
       if step % args.save_every == 0:
-        # Save checkpoint (simplified - use Orbax for production)
+        # Save checkpoint
         print(f'Saving checkpoint at step {step}...')
+        checkpoints.save_checkpoint(
+            ckpt_dir=args.output_dir,
+            target=state,
+            step=step,
+            keep=3,
+            overwrite=True
+        )
 
       # Run validation
       if step % args.eval_every == 0:
