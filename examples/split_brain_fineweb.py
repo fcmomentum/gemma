@@ -395,10 +395,6 @@ def main():
       student_temp=args.student_temp,
       teacher_temp=args.teacher_temp,
   )
-      use_dino_loss=args.use_dino_loss,
-      student_temp=args.student_temp,
-      teacher_temp=args.teacher_temp,
-  )
 
   # Create model
   model, base_config = get_model_and_config(args.model_size, split_brain_config)
