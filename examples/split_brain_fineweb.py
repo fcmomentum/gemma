@@ -98,11 +98,16 @@ def get_model_and_config(
     raise ValueError(f'Unsupported model size: {model_size}')
 
   # Parse custom layers if provided
-  if layer_indices_str:
-    try:
-      split_layers = tuple(int(x.strip()) for x in layer_indices_str.split(','))
-    except ValueError:
-      raise ValueError(f'Invalid layer indices: {layer_indices_str}')
+  if layer_indices_str is not None:
+    if layer_indices_str.strip().lower() in ('none', 'empty', ''):
+      split_layers = ()
+    elif layer_indices_str.strip().lower() == 'default':
+      split_layers = default_layers
+    else:
+      try:
+        split_layers = tuple(int(x.strip()) for x in layer_indices_str.split(','))
+      except ValueError:
+        raise ValueError(f'Invalid layer indices: {layer_indices_str}')
   else:
     split_layers = default_layers
 
