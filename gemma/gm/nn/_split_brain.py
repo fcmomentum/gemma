@@ -378,6 +378,8 @@ class SplitBrainBlock(nn.Module):
       teacher_target = jax.lax.stop_gradient(teacher_target)
 
     if config.use_dino_loss:
+      # specific debug print to confirm path
+      # jax.debug.print("Computing DINO loss")
       # DINO-style loss: Cross-Entropy between Softmax(S/t_s) and Softmax(T/t_t)
       # Normalize over feature dimension
       student_logits = student_pred / config.student_temp

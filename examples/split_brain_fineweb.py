@@ -378,6 +378,9 @@ def main():
   print(f'Prophet weight λ = {args.prophet_weight}')
   print(f'Mask ratio = {args.mask_ratio}')
   print(f'Target shift = {args.target_shift}')
+  print(f'Use DINO loss = {args.use_dino_loss}')
+  if args.use_dino_loss:
+    print(f'Temperature (S/T) = {args.student_temp}/{args.teacher_temp}')
 
   # Initialize random keys
   rng = jax.random.PRNGKey(42)
@@ -388,6 +391,10 @@ def main():
       mask_ratio=args.mask_ratio,
       prophet_weight=args.prophet_weight,
       target_shift=args.target_shift,
+      use_dino_loss=args.use_dino_loss,
+      student_temp=args.student_temp,
+      teacher_temp=args.teacher_temp,
+  )
       use_dino_loss=args.use_dino_loss,
       student_temp=args.student_temp,
       teacher_temp=args.teacher_temp,
