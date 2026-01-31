@@ -526,8 +526,9 @@ def main():
   print(f'Final Aux loss: {float(metrics["aux_loss"]):.4f}')
 
   # Finish W&B run
-  if args.wandb_project:
-    wandb.finish()
+  # Finish W&B run
+  # if args.wandb_project:
+  #   wandb.finish()
 
 
 if __name__ == '__main__':
