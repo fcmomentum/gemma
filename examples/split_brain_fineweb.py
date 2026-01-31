@@ -82,16 +82,26 @@ SPLIT_BRAIN_LAYERS_1B = (19, 20, 21)
 def get_model_and_config(
     model_size: str,
     split_brain_config: _split_brain.SplitBrainConfig,
+    layer_indices_str: str | None = None,
 ) -> tuple[nn.Module, gm.nn.config.TransformerConfig]:
   """Get model and config for the specified size."""
   if model_size == '270m':
     base_config = gm.nn.Gemma3_270M.config
-    split_layers = SPLIT_BRAIN_LAYERS_270M
+    default_layers = SPLIT_BRAIN_LAYERS_270M
   elif model_size == '1b':
     base_config = gm.nn.Gemma3_1B.config
-    split_layers = SPLIT_BRAIN_LAYERS_1B
+    default_layers = SPLIT_BRAIN_LAYERS_1B
   else:
     raise ValueError(f'Unsupported model size: {model_size}')
+
+  # Parse custom layers if provided
+  if layer_indices_str:
+    try:
+      split_layers = tuple(int(x.strip()) for x in layer_indices_str.split(','))
+    except ValueError:
+      raise ValueError(f'Invalid layer indices: {layer_indices_str}')
+  else:
+    split_layers = default_layers
 
   # Create split-brain config with the appropriate layers
   sb_config = _split_brain.SplitBrainConfig(
@@ -338,6 +348,8 @@ def main():
                       help='Student temperature for DINO loss')
   parser.add_argument('--teacher_temp', type=float, default=0.04,
                       help='Teacher temperature for DINO loss')
+  parser.add_argument('--split_brain_layers', type=str, default=None,
+                      help='Comma-separated layer indices (e.g., "13,14,15"). Defaults to 75% depth.')
   parser.add_argument('--output_dir', type=str, default='/tmp/split_brain')
   parser.add_argument('--log_every', type=int, default=100)
   parser.add_argument('--save_every', type=int, default=1000)
@@ -400,7 +412,11 @@ def main():
   )
 
   # Create model
-  model, base_config = get_model_and_config(args.model_size, split_brain_config)
+  model, base_config = get_model_and_config(
+      args.model_size,
+      split_brain_config,
+      args.split_brain_layers
+  )
   print(f'Model has {base_config.num_layers} layers')
   print(f'Split-Brain applied at layers: {model.split_brain_config.split_brain_layers}')
 
