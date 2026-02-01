@@ -641,6 +641,18 @@ def main():
   step = int(state.step)
   start_time = time.time()
 
+  # If we resumed, we need to fast-forward the dataset to where we left off
+  # The original train_dataset started at skip=0.
+  # We should skip (step * batch_size) samples.
+  if step > 0:
+      print(f"Fast-forwarding training data by {step * args.batch_size} samples...")
+      train_dataset = prepare_fineweb_dataset(
+          tokenizer=tokenizer,
+          max_length=args.max_length,
+          split='train',
+          skip=step * args.batch_size,
+      )
+
   for example in train_dataset:
     batch_buffer.append(example)
 
