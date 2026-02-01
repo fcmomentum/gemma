@@ -618,6 +618,11 @@ def main():
       weight_decay=0.01,
   )
 
+  # Ensure all parameters are on the same device (e.g. TPU:0) to avoid mismatch
+  # This handles cases where loaded params are sharded but new params are not.
+  print("Ensuring parameter device consistency...")
+  params = jax.tree_map(lambda x: jax.device_put(x, jax.devices()[0]), params)
+
   state = train_state.TrainState.create(
       apply_fn=model.apply,
       params=params,
