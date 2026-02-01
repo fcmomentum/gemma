@@ -548,27 +548,23 @@ def main():
   # Create tokenizer and datasets (train + validation)
   tokenizer = create_tokenizer(args.model_size)
 
-  # Train dataset (starts from 0)
-  train_dataset = prepare_fineweb_dataset(
-      tokenizer=tokenizer,
-      max_length=args.max_length,
-      split='train',
-      skip=0,
-  )
-
-  # Validation dataset (starts after training + buffer)
-  # Ensure we validate on "future" data not seen during training
-  total_train_samples = args.num_train_steps * args.batch_size
-  val_buffer = 10000
-  val_start_offset = total_train_samples + val_buffer
+  # Training and Validation Split
   num_val_samples = args.num_val_batches * args.batch_size * 2
 
+  # Validation dataset: First N samples
   val_dataset = prepare_fineweb_dataset(
       tokenizer=tokenizer,
       max_length=args.max_length,
       split='train',
-      skip=val_start_offset,
       num_samples=num_val_samples,
+  )
+
+  # Train dataset: Rest of the samples (skip first N)
+  train_dataset = prepare_fineweb_dataset(
+      tokenizer=tokenizer,
+      max_length=args.max_length,
+      split='train',
+      skip=num_val_samples,
   )
 
   # Initialize model (random init)
